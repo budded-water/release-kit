@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import assert from "node:assert/strict";
 
 const root = process.cwd();
+const installer = process.argv[2] ?? "pnpm";
+assert(["pnpm", "npm"].includes(installer), "Unsupported consumer package manager");
 const consumer = await mkdtemp(join(tmpdir(), "release-kit-package-"));
 const env = { ...process.env, npm_config_cache: join(consumer, "cache") };
 const run = (bin, args, cwd = consumer) =>
@@ -16,8 +18,8 @@ const run = (bin, args, cwd = consumer) =>
     stdio: ["ignore", "pipe", "pipe"],
   });
 try {
-  const [pack] = JSON.parse(
-    run("npm", ["pack", "--json", "--pack-destination", consumer], root),
+  const pack = JSON.parse(
+    run("pnpm", ["pack", "--json", "--pack-destination", consumer], root),
   );
   assert(
     pack.files.every(
@@ -29,12 +31,17 @@ try {
     join(consumer, "package.json"),
     '{"private":true,"type":"module"}\n',
   );
-  run("npm", [
+  // npm is a compatibility consumer, not this repository's package manager.
+  run(installer, installer === "pnpm" ? [
+    "add",
+    "--ignore-scripts",
+    resolve(consumer, pack.filename),
+  ] : [
     "install",
     "--ignore-scripts",
     "--no-audit",
     "--no-fund",
-    join(consumer, pack.filename),
+    resolve(consumer, pack.filename),
   ]);
   await writeFile(
     join(consumer, "verify.mjs"),
@@ -78,7 +85,7 @@ try {
     "Installed executable and explicit project-module loading passed.",
   );
   console.log(
-    `Packed ${pack.files.length} files; no test or dependency tree bundled.`,
+    `Packed ${pack.files.length} files; ${installer} consumer passed; no test or dependency tree bundled.`,
   );
 } finally {
   await rm(consumer, { recursive: true, force: true });
