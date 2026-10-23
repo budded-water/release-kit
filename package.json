@@ -1,0 +1,33 @@
+{
+  "name": "@budded-water/release-kit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "description": "Resumable mobile release orchestration with project-owned validation",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/budded-water/release-kit.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    "./*": "./src/*.mjs"
+  },
+  "bin": {
+    "release-kit": "bin/release-kit.mjs"
+  },
+  "files": [
+    "src/*.mjs",
+    "!src/*.test.mjs",
+    "bin",
+    "README.md",
+    "SECURITY.md"
+  ],
+  "scripts": {
+    "test": "node --test src/*.test.mjs test/*.test.mjs",
+    "check": "node scripts/check-boundaries.mjs && npm test",
+    "verify:package": "node scripts/verify-package.mjs"
+  }
+}

@@ -1,0 +1,38 @@
+name: Release on designated Mac
+run-name: Release request ${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: Existing private request ID on the designated release Mac
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-request-${{ inputs.request_id }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.repository.private == true &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: [self-hosted, macOS, release-example]
+    timeout-minutes: 360
+    steps:
+      - name: Claim the existing request and run the trusted local release worker
+        shell: bash --noprofile --norc -eo pipefail {0}
+        env:
+          REQUEST_ID: ${{ inputs.request_id }}
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
+          LC_CTYPE: en_US.UTF-8
+        run: |
+          unset GEM_HOME GEM_PATH NODE_OPTIONS NODE_PATH
+          exec "${RELEASE_KIT_NODE:?}" "${RELEASE_KIT_BOOTSTRAP:?}" worker \
+            --request "$REQUEST_ID"
