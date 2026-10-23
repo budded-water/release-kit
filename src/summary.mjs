@@ -11,6 +11,7 @@ const validation = (value) =>
     'source',
     'startedAt',
     'finishedAt',
+    'policy',
     'checksReused',
     'checksFinishedAt',
     'evidenceReused',

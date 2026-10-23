@@ -5,6 +5,11 @@ export function requireProject(project) {
     project?.schemaVersion !== 1 ||
     typeof project.checksDescription !== "string" ||
     !project.checksDescription.trim() ||
+    (project.sourceValidationPolicy !== undefined &&
+      (typeof project.sourceValidationPolicy !== "string" ||
+        !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(
+          project.sourceValidationPolicy,
+        ))) ||
     typeof project.uiScope !== "string" ||
     !project.uiScope.trim() ||
     [

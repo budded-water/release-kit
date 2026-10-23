@@ -189,11 +189,19 @@ export function createRunner({
   const projectContext = (root, source) => ({ root, source, config, command, env, environment, signal });
   async function validateSource(state, directory) {
     const hooks = requireProject(project);
+    // Explicit semantic identity covers trusted hook dependencies, not just their
+    // function text. Legacy adapters remain executable but cannot reuse a pass.
+    const policy = hooks.sourceValidationPolicy === undefined ? null : digest({
+      contract: 'release-kit/source-validation/v1',
+      project: hooks.sourceValidationPolicy,
+      node: process.version,
+    });
     state.sourceValidation = {
       scope: 'source-checks',
       state: 'running',
       source: state.plan.source,
       command: hooks.checksDescription,
+      policy,
       startedAt: now(),
     };
     await saveState(directory, state);
@@ -201,17 +209,34 @@ export function createRunner({
       if (signal?.aborted) throw new Error('Release execution interrupted');
       const root = join(directory, 'validation');
       await prepareCheckout({ repo, root, source: state.plan.source, command });
-      // Installations are reconstructable; green checks are reused only after
-      // verifying that the isolated checkout still matches the pinned source.
-      await step(state, directory, 'install-validation', () =>
-        hooks.installValidation(projectContext(root, state.plan.source)),
-      );
-      const checksReused = state.stages.checks?.status === 'succeeded';
+      const installationReused = policy !== null &&
+        state.stages['install-validation']?.status === 'succeeded' &&
+        state.stages['install-validation'].output?.policy === policy;
+      const checksReused = installationReused &&
+        state.stages.checks?.status === 'succeeded' &&
+        state.stages.checks.output?.policy === policy;
+      // Revoke stale passes durably before a replacement installation can fail or
+      // be interrupted. Original outputs remain in the append-only journal.
+      for (const [key, reused] of [
+        ['install-validation', installationReused], ['checks', checksReused],
+      ]) {
+        if (!reused && state.stages[key]?.status === 'succeeded') {
+          state.stages[key] = {
+            ...state.stages[key], status: 'invalidated',
+            invalidatedAt: now(), reason: 'source-validation-policy-unverified',
+          };
+        }
+      }
+      await saveState(directory, state);
+      await step(state, directory, 'install-validation', async () => {
+        await hooks.installValidation(projectContext(root, state.plan.source));
+        return { policy };
+      });
       await step(state, directory, 'checks', async () => {
         await hooks.checkSource(projectContext(root, state.plan.source));
         await assertCheckout(root, state.plan.source, command);
         if (signal?.aborted) throw new Error('Release execution interrupted');
-        return { source: state.plan.source, command: hooks.checksDescription };
+        return { source: state.plan.source, command: hooks.checksDescription, policy };
       });
       await assertCheckout(root, state.plan.source, command);
       if (signal?.aborted) throw new Error('Release execution interrupted');

@@ -9,6 +9,8 @@ export default {
   repo: process.cwd(),
   project: {
     schemaVersion: 1,
+    // Change this identity when installation/check semantics or inputs change.
+    sourceValidationPolicy: "example/source-checks/v1",
     checksDescription: "npm run check",
     uiScope: "not-configured",
     installValidation: ({ command, root, env }) =>
