@@ -18,15 +18,17 @@ The initial planner expects an Expo `app.json`, `eas.json` and `runtimeVersion.p
 ## Use
 
 ```sh
-npm install --save-dev 'git+https://github.com/budded-water/release-kit.git#<reviewed-commit>'
-npx release-kit --project ./release.project.mjs validate --ref <source-commit> \
+pnpm add --save-dev 'git+https://github.com/budded-water/release-kit.git#<reviewed-commit>'
+pnpm exec release-kit --project ./release.project.mjs validate --ref <source-commit> \
   --platforms ios,android --config /absolute/private/release.json --state-dir /absolute/private/project-state
-npx release-kit status <release-id> --state-dir /absolute/private/project-state --summary
+pnpm exec release-kit status <release-id> --state-dir /absolute/private/project-state --summary
 ```
 
 `--project` must be the first argument. It explicitly imports a **trusted executable local module** exporting `{ repo, project, platformAdapters }`. It has the caller's privileges; it is not a sandbox. Never point it at unreviewed pull-request source. The tool does not discover project modules from candidate checkouts or journals. [The source-only example](examples/release.project.mjs) deliberately refuses UI and build operations until real adapters are supplied.
 
 Embedding consumers can import `@budded-water/release-kit/cli`, `/engine`, `/plan`, `/state`, `/command`, `/executor`, `/worker`, `/stores` and other named modules. A thin wrapper can supply defaults and retain an existing command line. `RELEASE_KIT_EXECUTOR_CONFIG` selects the private executor policy; consumers may map a legacy environment name in their wrapper.
+
+This repository uses the pnpm version pinned in `package.json`. Consumers may keep their own package manager; the source-validation example uses npm for a hypothetical npm consumer. Adapt its commands to the consumer's lockfile and bump `sourceValidationPolicy` whenever installation/check semantics change. Repository tooling changes do not upgrade installed controls or consumer dependency pins.
 
 ## Project contract, version 1
 
@@ -88,8 +90,11 @@ An installed control, its trusted project adapter and this exact dependency pin 
 ## Verification and limits
 
 ```sh
-npm run check
-npm run verify:package
+pnpm install --frozen-lockfile
+pnpm run check
+pnpm run verify:package
 ```
+
+The package check uses `pnpm pack` and installs the resulting tarball into separate synthetic pnpm and npm consumers, verifying imports and the executable in each. `pnpm-lock.yaml` is the only repository dependency lockfile. pnpm uses a shared content-addressable store to reuse dependency files across projects; this package currently has no dependencies to deduplicate.
 
 Tests cover bounded subprocess cleanup, private state, provider failures, store-content planning, request ownership, retirement, polling, summaries and two synthetic project adapters. Synthetic adapters demonstrate isolation and recovery; they are not a second real consumer, native UI acceptance or store readiness. Real consumer regression and packaging acceptance must be recorded against exact commits separately. A GitHub response of unknown remains unverified even when local recovery succeeds.
