@@ -56,6 +56,27 @@ try {
   `,
   );
   process.stdout.write(run(process.execPath, ["verify.mjs"]));
+  const projectPath = join(consumer, "trusted project.mjs");
+  await writeFile(
+    projectPath,
+    `export default { repo: ${JSON.stringify(consumer)} };\n`,
+  );
+  const result = JSON.parse(
+    run(join(consumer, "node_modules", ".bin", "release-kit"), [
+      "--project",
+      projectPath,
+      "status",
+      "release-" + "a".repeat(24),
+      "--state-dir",
+      join(consumer, "state"),
+      "--summary",
+    ]),
+  );
+  assert.equal(result.releaseId, "release-" + "a".repeat(24));
+  assert.equal(result.summaryOnly, true);
+  console.log(
+    "Installed executable and explicit project-module loading passed.",
+  );
   console.log(
     `Packed ${pack.files.length} files; no test or dependency tree bundled.`,
   );
