@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { createPlan } from "../src/plan.mjs";
 import { createRunner } from "../src/engine.mjs";
 import { runCommand } from "../src/command.mjs";
-import { digest, loadState, releasePath } from "../src/state.mjs";
+import { digest, loadState, releasePath, saveState } from "../src/state.mjs";
 import { main } from "../src/cli.mjs";
 
 async function fixture(t, name) {
@@ -45,6 +45,7 @@ async function fixture(t, name) {
   const calls = [];
   const project = {
     schemaVersion: 1,
+    sourceValidationPolicy: `${name}/checks/v1`,
     checksDescription: `${name} checks`,
     uiScope: "synthetic-contract-only",
     async installValidation() {
@@ -180,5 +181,200 @@ test("CLI validation uses the supplied adapter and history remains readable with
     0,
   );
   assert.equal(output.at(-1).sourceValidation.state, "passed");
+  assert.match(output.at(-1).sourceValidation.policy, /^[a-f0-9]{64}$/);
   assert.equal(output.at(-1).summaryOnly, true);
+});
+
+async function seedDeliveryHistory(f) {
+  const directory = releasePath(f.store, f.plan.id);
+  const state = await loadState(directory);
+  Object.assign(state, {
+    publicationRequested: true,
+    artifacts: {
+      ios: { path: "/synthetic/retained.ipa", sha256: "b".repeat(64) },
+    },
+    outcomes: { ios: { state: "processing", providerId: "retained-build" } },
+    acceptance: { ios: { provenance: "retained-acceptance" } },
+    checkpoints: { ios: { submitted: { id: "retained-submission" } } },
+    buildAttempts: { ios: 2 },
+  });
+  await saveState(directory, state);
+  const keys = [
+    "plan",
+    "publicationRequested",
+    "artifacts",
+    "outcomes",
+    "acceptance",
+    "checkpoints",
+    "buildAttempts",
+  ];
+  const delivery = Object.fromEntries(
+    keys.map((key) => [key, structuredClone(state[key])]),
+  );
+  const events = new Map(
+    await Promise.all(
+      (await readdir(join(directory, "events"))).map(async (name) => [
+        name,
+        await readFile(join(directory, "events", name)),
+      ]),
+    ),
+  );
+  return async () => {
+    const updated = await loadState(directory);
+    for (const [key, value] of Object.entries(delivery))
+      assert.deepEqual(updated[key], value, key);
+    for (const [name, bytes] of events)
+      assert.deepEqual(await readFile(join(directory, "events", name)), bytes);
+    assert.deepEqual(await readdir(join(f.store, "locks")), []);
+    return updated;
+  };
+}
+
+test("changed source policy runs its new gate and cannot relabel an old pass", async (t) => {
+  const f = await fixture(t, "policy-change");
+  const first = await f.runner().validate(f.plan);
+  const preserved = await seedDeliveryHistory(f);
+  f.project.sourceValidationPolicy = "policy-change/checks/v2";
+  f.project.checksDescription = "new strict policy";
+  let newCalls = 0;
+  f.project.checkSource = async () => {
+    newCalls++;
+    throw new Error("New gate rejected");
+  };
+  await assert.rejects(f.runner().validate(f.plan), /New gate rejected/);
+  const failed = await preserved();
+  assert.equal(newCalls, 1);
+  assert.equal(failed.sourceValidation.state, "failed");
+  assert.notEqual(
+    failed.sourceValidation.policy,
+    first.sourceValidation.policy,
+  );
+  assert.equal(failed.stages.checks.status, "failed");
+  assert.equal(f.calls.filter((call) => call === "install").length, 2);
+  f.project.checkSource = async () => {
+    newCalls++;
+  };
+  const repaired = await f.runner().validate(f.plan);
+  assert.equal(repaired.sourceValidation.checksReused, false);
+  assert.equal(repaired.sourceValidation.state, "passed");
+  await f.runner().validate(f.plan);
+  assert.equal(newCalls, 2);
+  await preserved();
+});
+
+test("unchanged source policy reuses evidence across unrelated adapter changes", async (t) => {
+  const f = await fixture(t, "stable-policy");
+  const first = await f.runner().validate(f.plan);
+  const other = createRunner({
+    ...f,
+    project: {
+      ...f.project,
+      uiScope: "unrelated-verifier-scope",
+      evaluateUI: async () =>
+        assert.fail("source-only validation cannot run UI"),
+    },
+  });
+  const next = await other.validate(f.plan);
+  assert.equal(next.sourceValidation.checksReused, true);
+  assert.deepEqual(next.stages.checks, first.stages.checks);
+  assert.deepEqual(f.calls, ["install", "check"]);
+});
+
+test("legacy successful stages are upgraded by revalidation without rewriting history", async (t) => {
+  const f = await fixture(t, "legacy-policy");
+  await f.runner().validate(f.plan);
+  const directory = releasePath(f.store, f.plan.id);
+  const legacy = await loadState(directory);
+  delete legacy.sourceValidation.policy;
+  legacy.stages["install-validation"].output = null;
+  delete legacy.stages.checks.output.policy;
+  await saveState(directory, legacy);
+  const preserved = await seedDeliveryHistory(f);
+  const updated = await f.runner().validate(f.plan);
+  assert.equal(updated.sourceValidation.checksReused, false);
+  assert.match(updated.sourceValidation.policy, /^[a-f0-9]{64}$/);
+  const again = await f.runner().validate(f.plan);
+  assert.equal(again.sourceValidation.checksReused, true);
+  assert.deepEqual(f.calls, ["install", "check", "install", "check"]);
+  await preserved();
+});
+
+test("legacy adapters without a declared policy remain usable but never cache a pass", async (t) => {
+  const f = await fixture(t, "unversioned");
+  await f.runner().validate(f.plan);
+  delete f.project.sourceValidationPolicy;
+  for (let index = 0; index < 2; index++) {
+    const state = await f.runner().validate(f.plan);
+    assert.equal(state.sourceValidation.state, "passed");
+    assert.equal(state.sourceValidation.policy, null);
+    assert.equal(state.sourceValidation.checksReused, false);
+  }
+  assert.deepEqual(f.calls, [
+    "install",
+    "check",
+    "install",
+    "check",
+    "install",
+    "check",
+  ]);
+});
+
+test("replacement install failure revokes old checks before work and rollback must revalidate", async (t) => {
+  const f = await fixture(t, "install-failure");
+  await f.runner().validate(f.plan);
+  const preserved = await seedDeliveryHistory(f);
+  const original = { ...f.project };
+  f.project.sourceValidationPolicy = "install-failure/checks/v2";
+  f.project.installValidation = async () => {
+    const during = await loadState(releasePath(f.store, f.plan.id));
+    assert.equal(during.stages.checks.status, "invalidated");
+    assert.equal(during.sourceValidation.state, "running");
+    throw new Error("Replacement install failed");
+  };
+  await assert.rejects(
+    f.runner().validate(f.plan),
+    /Replacement install failed/,
+  );
+  const failed = await preserved();
+  assert.equal(failed.stages.checks.status, "invalidated");
+  assert.equal(failed.sourceValidation.state, "failed");
+  Object.assign(f.project, original);
+  const rollback = await f.runner().validate(f.plan);
+  assert.equal(rollback.sourceValidation.checksReused, false);
+  assert.deepEqual(f.calls, ["install", "check", "install", "check"]);
+  await preserved();
+});
+
+test("cancellation during replacement installation cannot restore a cached pass", async (t) => {
+  const f = await fixture(t, "cancel-policy");
+  await f.runner().validate(f.plan);
+  const original = { ...f.project };
+  const abort = new AbortController();
+  f.project.sourceValidationPolicy = "cancel-policy/checks/v2";
+  f.project.installValidation = async () => {
+    abort.abort();
+  };
+  await assert.rejects(
+    createRunner({ ...f, signal: abort.signal }).validate(f.plan),
+    /interrupted/,
+  );
+  const state = await loadState(releasePath(f.store, f.plan.id));
+  assert.equal(state.sourceValidation.state, "failed");
+  assert.equal(state.stages.checks.status, "invalidated");
+  f.project.installValidation = original.installValidation;
+  const resumed = await f.runner().validate(f.plan);
+  assert.equal(resumed.sourceValidation.checksReused, false);
+  assert.equal(resumed.sourceValidation.state, "passed");
+});
+
+test("malformed declared policy identities are rejected instead of enabling reuse", async (t) => {
+  const f = await fixture(t, "invalid-policy");
+  for (const policy of ["", " ", null, {}, "x".repeat(201), "line\nbreak"]) {
+    f.project.sourceValidationPolicy = policy;
+    await assert.rejects(
+      f.runner().validate(f.plan),
+      /trusted version-1 project adapter/,
+    );
+  }
+  assert.deepEqual(f.calls, []);
 });

@@ -30,7 +30,8 @@ Embedding consumers can import `@budded-water/release-kit/cli`, `/engine`, `/pla
 
 ## Project contract, version 1
 
-`project` supplies `schemaVersion: 1`, `checksDescription`, `uiScope` and these asynchronous functions:
+`project` supplies `schemaVersion: 1`, `checksDescription`, `uiScope`, an optional
+`sourceValidationPolicy` identity and these asynchronous functions:
 
 | Hook                                 | Contract                                                                                             |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------- |
@@ -41,6 +42,38 @@ Embedding consumers can import `@budded-water/release-kit/cli`, `/engine`, `/pla
 | `installBuild({ ...ctx, platform })` | Install the selected host's build dependencies                                                       |
 
 `ctx` includes `root` (isolated source), `source`, `config`, `command`, `env`, `environment` and `signal`. Hooks use the supplied bounded command runner and cancellation signal, await cleanup, and never mutate publication journals. UI receipts must be bounded, unredirected files owned by the selected source checkout. The core hashes the stored receipt and invokes project revalidation before any build; the adapter is responsible for interpreting and checking the receipt and all linked reports. A forged or weak trusted adapter can defeat its own gate—do not treat arbitrary callbacks as validated evidence.
+
+### Source validation reuse
+
+Declare `sourceValidationPolicy` as a bounded nonempty identifier (up to 200
+ASCII letters, digits, `.`, `_`, `:`, `/`, `-`; first character alphanumeric).
+It identifies the trusted **installation and source-check policy**, including
+transitive helper/configuration inputs outside the candidate source. Change it
+whenever those semantics change. A consumer can derive it from hashes of the
+reviewed policy files; a manually versioned ID requires an explicit bump. Function
+text alone cannot identify closed-over or imported policy. The core combines this
+identity with its validation contract version and the actual Node version.
+
+Successful installation/check stages are reusable only when both carry the current
+fingerprint and the isolated source still matches the plan. A policy change or
+legacy stage without the fingerprint invalidates old source passes before any
+replacement installation, then reruns installation and checks. Install failures,
+check failures and cancellation cannot restore those passes. Unchanged policy
+retains reuse; unrelated control/package edits do not invalidate it. Core changes
+to these validation semantics must advance the validation contract version.
+
+Adapters without the optional identity still execute, but reinstall/recheck on
+every invocation. This is the safe compatibility default, not a permanent cache
+key. Status exposes the effective `sourceValidation.policy` fingerprint (or `null`
+when reuse is disabled). UI evidence still receives its independent per-use
+revalidation; this identity does not certify a different UI suite or runtime.
+
+The journal remains schema v1 with additive policy metadata and an `invalidated`
+status for reconstructable source stages. Old events, release identity, build
+attempts, acceptance, publication checkpoints and outcomes are preserved. Old
+runtime versions do not enforce this policy boundary: do not resume updated
+journals under an older core to bypass revalidation. Roll back to a reviewed
+policy-aware runtime/adapter while retaining the same journal.
 
 Source-only `validate` never calls platform build/publication adapters. `validate --ui` also runs the declared UI gate. `run`/`resume` retain artifact and acceptance gates. Unknown external operations require reconciliation rather than blind replay. `status --summary` is a progress projection, never approval or retry authority; omit the flag for full history. Passive `observe` differs from `status --remote`, which reconciles observations into the saved journal.
 
