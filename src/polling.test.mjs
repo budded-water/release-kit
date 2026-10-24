@@ -86,6 +86,8 @@ test('action-required states stop without additional observations or waits', asy
     'unknown',
     'unavailable',
     'pending-release',
+    'pending-review',
+    'accepted',
     'pending_operator',
     'awaiting_acceptance',
     'failed',

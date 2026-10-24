@@ -7,6 +7,7 @@ import { atomicJson, digest, privateDirectory, readJson } from './state.mjs';
 import { runCommand } from './command.mjs';
 import { assertMaintenanceOwner } from './coordination.mjs';
 import { dedicatedRunnerLabel } from './runner-policy.mjs';
+import { createCleanupGuard } from './cleanup.mjs';
 
 const SHA = /^[a-f0-9]{64}$/;
 const COMMIT = /^[a-f0-9]{40}$/;
@@ -923,11 +924,16 @@ export async function inspectDispatchRequests({ stateDirectory } = {}) {
   } catch {
     return { clear: false, requests, blockers: [{ reason: 'invalid-state-directory' }] };
   }
+  try {
+    await createCleanupGuard(stateDirectory).assertSafe();
+  } catch {
+    blockers.push({ reason: 'cleanup-incomplete' });
+  }
   const dispatch = join(stateDirectory, 'dispatch');
   try {
     await lstat(dispatch);
   } catch (error) {
-    if (error.code === 'ENOENT') return { clear: true, requests, blockers };
+    if (error.code === 'ENOENT') return { clear: blockers.length === 0, requests, blockers };
     return { clear: false, requests, blockers: [{ reason: 'invalid-dispatch-directory' }] };
   }
   let names;
@@ -1040,6 +1046,8 @@ export async function runRequest({
   signal,
 }) {
   const policy = normalizePolicy(inputPolicy);
+  const cleanup = createCleanupGuard(policy.stateDirectory, command);
+  command = cleanup.command;
   if (!['local', 'github'].includes(executor)) throw new Error('Invalid request executor');
   const retired = await retiredRequestStatus(policy, id);
   if (retired) return retired;
@@ -1052,7 +1060,7 @@ export async function runRequest({
   if (typeof validate !== 'function' || typeof execute !== 'function')
     throw new Error('Dispatch execution requires validation and execution callbacks');
   await validateInputs(stored.value, command);
-  await validate(structuredClone(stored.value));
+  await cleanup.run(() => validate(structuredClone(stored.value)));
   // The callback can take time. Recheck all pinned bytes before competing for the claim.
   if ((await requestRecord(policy, id)).sha256 !== stored.sha256)
     throw new Error('Dispatch manifest changed during validation');
@@ -1077,7 +1085,7 @@ export async function runRequest({
   let result;
   try {
     interrupted(signal);
-    const outcome = await execute(structuredClone(stored.value));
+    const outcome = await cleanup.run(() => execute(structuredClone(stored.value)));
     if (
       !object(outcome) ||
       !Number.isInteger(outcome.exitCode) ||
