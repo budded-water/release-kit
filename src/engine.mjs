@@ -20,6 +20,7 @@ import {
 import { prepareStoreContent } from './store-content.mjs';
 import { requireProject } from './project.mjs';
 import { createCleanupGuard } from './cleanup.mjs';
+import { runCommand } from './command.mjs';
 
 const now = () => new Date().toISOString();
 function assertNativeWorkspace(directory) {
@@ -66,7 +67,7 @@ export function createRunner({
   repo,
   store,
   config,
-  command,
+  command = runCommand,
   adapters,
   project,
   environment = process.env,

@@ -116,6 +116,17 @@ test("two synthetic consumers select their own checks without changing core or s
   }
 });
 
+test("direct library consumers can validate source and UI without a command override", async t => {
+  const f = await fixture(t, "default-command");
+  const runner = createRunner({ ...f, command: undefined });
+  const source = await runner.validate(f.plan);
+  assert.equal(source.sourceValidation.state, "passed");
+  const ui = await runner.validate(f.plan, { ui: true });
+  assert.equal(ui.sourceValidation.checksReused, true);
+  assert.equal(ui.uiValidation.state, "passed");
+  assert.deepEqual(f.calls, ["install", "check", "evaluate", "revalidate"]);
+});
+
 test("UI reuse revalidates project evidence and tampering revokes the current pass", async (t) => {
   const f = await fixture(t, "evidence");
   const first = await f.runner().validate(f.plan, { ui: true });

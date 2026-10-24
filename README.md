@@ -30,6 +30,9 @@ Embedding consumers can import `@budded-water/release-kit/cli`, `/engine`, `/pla
 
 This repository uses the pnpm version pinned in `package.json`. Consumers may keep their own package manager; the source-validation example uses npm for a hypothetical npm consumer. Adapt its commands to the consumer's lockfile and bump `sourceValidationPolicy` whenever installation/check semantics change. Repository tooling changes do not upgrade installed controls or consumer dependency pins.
 
+Direct `createRunner` consumers may omit `command` to use the bounded default
+command runner, or inject their own implementation for the trusted adapter.
+
 ## Project contract, version 1
 
 `project` supplies `schemaVersion: 1`, `checksDescription`, `uiScope`, an optional
