@@ -127,10 +127,25 @@ unknown; a failure before claiming leaves the request pending. Maintenance
 inventory reports a blocker. Local `status` remains readable. Partial or malformed fences
 also block admission; neither elapsed time nor PID disappearance clears one.
 
+The public `dispatchRequest` API enforces the same fence as CLI execution.
+Cleanup uncertainty during GitHub availability checks stops dispatch instead of
+triggering local fallback. Uncertainty during submission retains an unknown
+response and its original intent; recovery never authorizes another submission.
+The built-in GitHub client preserves the cleanup flag while sanitizing provider
+errors. Custom clients must likewise propagate cleanup failures.
+
+The exclusive fence is created before writing diagnostic JSON, so a failed
+diagnostic write or writer process crash leaves a blocking empty or partial file.
+Temporary `cleanup-incomplete.lock.*.tmp` files left by earlier writers also
+block admission and must be reconciled during operator recovery. If the filesystem
+cannot create the initial fence at all, only the current process's sticky block
+and retained ownership locks are available; stop all admission until storage and
+process state have been reconciled.
+
 Recovery is an operator procedure: stop admission through all entry points,
 inspect the fence and retained ownership records, establish that the owning
 process and all children stopped, and reconcile any provider effects. Only then
-remove the verified stale locks and the fence, retaining journals and dispatch
+remove the verified stale locks and all cleanup fence evidence, retaining journals and dispatch
 records, and restart with a new runner. There is no automatic unlock or provider
 replay. The fence is additive installation state with schema version 1; legacy
 stores without a fence need no migration. Older runtimes do not enforce it, so

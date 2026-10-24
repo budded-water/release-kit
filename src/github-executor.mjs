@@ -27,6 +27,13 @@ function unavailable(reason) {
   return { available: false, reason };
 }
 
+function rethrowCleanup(error) {
+  if (error?.cleanupIncomplete === true)
+    throw Object.assign(new Error('GitHub subprocess cleanup is unconfirmed'), {
+      cleanupIncomplete: true,
+    });
+}
+
 function validPolicy(policy) {
   return (
     /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(policy?.repository ?? '') &&
@@ -180,7 +187,8 @@ export function createGithubExecutor({ policy, command = runCommand, environment
       if ((await head()) !== workflowSha) return unavailable('workflow-ref-changed');
       verified = { workflowSha, workflowDigest, runnerId: runner.id };
       return { available: true, reason: 'designated-mac-ready', ...verified };
-    } catch {
+    } catch (error) {
+      rethrowCleanup(error);
       // Provider/CLI output may contain account or credential data. Availability
       // uncertainty is a local fallback decision, never a raw response in a journal.
       return unavailable('github-availability-unknown');
@@ -198,7 +206,8 @@ export function createGithubExecutor({ policy, command = runCommand, environment
     let current;
     try {
       current = await head();
-    } catch {
+    } catch (error) {
+      rethrowCleanup(error);
       throw new Error('GitHub dispatch preflight is unavailable; no request was sent');
     }
     if (current !== attestation.workflowSha)
@@ -227,7 +236,8 @@ export function createGithubExecutor({ policy, command = runCommand, environment
         runUrl: parsed.html_url,
         workflowSha: attestation.workflowSha,
       };
-    } catch {
+    } catch (error) {
+      rethrowCleanup(error);
       throw new Error('GitHub dispatch response is unknown; reconcile the durable local request');
     }
   }
@@ -251,7 +261,8 @@ export function createGithubExecutor({ policy, command = runCommand, environment
     let body;
     try {
       body = await api(endpoint(`/actions/runs/${id}/attempts/${attempt}`), { signal });
-    } catch {
+    } catch (error) {
+      rethrowCleanup(error);
       // HTTP/CLI failures are deliberately indistinguishable here: gh can include
       // credentials, account data or provider bodies in its exception/output.
       return failed(signal?.aborted ? 'github-observation-interrupted' : 'github-run-unavailable');

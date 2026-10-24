@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCleanupGuard } from './cleanup.mjs';
+import { runCommand } from './command.mjs';
 
 async function fixture(t) {
   const store = await mkdtemp(join(tmpdir(), 'release-cleanup-'));
@@ -43,3 +44,58 @@ test('partial and redirected cleanup fences block without reading or rewriting e
     if (variant === 'partial') assert.equal(await readFile(path, 'utf8'), '{');
   }
 });
+
+test('legacy temporary fences block admission without migrating or deleting evidence', async t => {
+  const { store, path } = await fixture(t);
+  await writeFile(`${path}.legacy.tmp`, '{');
+  await assert.rejects(createCleanupGuard(store, () => assert.fail('Must not launch')).command(), {
+    cleanupIncomplete: true,
+  });
+  assert.equal(await readFile(`${path}.legacy.tmp`, 'utf8'), '{');
+});
+
+for (const mode of ['write-failure', 'crash-after-open', 'crash-after-sync']) {
+  test(`cleanup fence survives ${mode} and blocks another process`, async t => {
+    const { store, path } = await fixture(t);
+    // Fault injection lives in a separate process so built-in module overrides
+    // cannot affect the test runner or other tests.
+    const child = `
+      import fs from 'node:fs';
+      import { syncBuiltinESMExports } from 'node:module';
+      const [store, mode, moduleUrl] = process.argv.slice(1);
+      const originalOpen = fs.promises.open;
+      fs.promises.open = async (...args) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]).includes('cleanup-incomplete.lock') && args[1] === 'wx') {
+          if (mode === 'crash-after-open') process.exit(77);
+          if (mode === 'write-failure') handle.writeFile = async () => {
+            throw Object.assign(new Error('Synthetic full disk'), { code: 'ENOSPC' });
+          };
+          if (mode === 'crash-after-sync') {
+            const sync = handle.sync.bind(handle);
+            handle.sync = async () => { await sync(); process.exit(77); };
+          }
+        }
+        return handle;
+      };
+      syncBuiltinESMExports();
+      const { createCleanupGuard } = await import(moduleUrl);
+      const guard = createCleanupGuard(store);
+      try {
+        await guard.capture(Object.assign(new Error('Synthetic unsettled process'), { cleanupIncomplete: true }));
+      } catch (error) {
+        if (error.cleanupIncomplete !== true || !guard.blocked) throw error;
+        process.stdout.write('blocked');
+      }
+    `;
+    const action = runCommand(process.execPath, ['--input-type=module', '-e', child, store, mode, new URL('./cleanup.mjs', import.meta.url).href]);
+    if (mode.startsWith('crash-')) await assert.rejects(action, error => error.exitCode === 77);
+    else assert.equal((await action).stdout, 'blocked');
+    // The admission authority exists even when diagnostic JSON is incomplete.
+    const bytes = await readFile(path);
+    if (mode !== 'crash-after-sync') assert.equal(bytes.length, 0);
+    await assert.rejects(createCleanupGuard(store, () => assert.fail('Must not launch')).command(), {
+      cleanupIncomplete: true,
+    });
+  });
+}

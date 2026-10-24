@@ -1144,8 +1144,14 @@ function availability(value) {
   };
 }
 
-export async function dispatchRequest({
-  policy: inputPolicy,
+export async function dispatchRequest(options) {
+  const policy = normalizePolicy(options.policy);
+  const cleanup = createCleanupGuard(policy.stateDirectory, options.command ?? runCommand);
+  return cleanup.run(() => dispatchWithGuard({ ...options, policy, command: cleanup.command }, cleanup));
+}
+
+async function dispatchWithGuard({
+  policy,
   id,
   mode,
   github,
@@ -1154,8 +1160,7 @@ export async function dispatchRequest({
   signal,
   wait = (milliseconds, abortSignal) => delay(milliseconds, undefined, { signal: abortSignal }),
   command = runCommand,
-}) {
-  const policy = normalizePolicy(inputPolicy);
+}, cleanup) {
   if (!['auto', 'github'].includes(mode)) throw new Error('Dispatch mode must be auto or github');
   const retired = await retiredRequestStatus(policy, id);
   if (retired) return retired;
@@ -1169,8 +1174,9 @@ export async function dispatchRequest({
     let available = null;
     if (policy.github.enabled) {
       try {
-        available = availability(await github.available());
-      } catch {
+        available = availability(await cleanup.run(() => github.available()));
+      } catch (error) {
+        if (error?.cleanupIncomplete === true) throw error;
         // API/auth/network failure proves neither capacity nor a running worker.
       }
     }
@@ -1209,7 +1215,7 @@ export async function dispatchRequest({
         interrupted(signal);
         let response;
         try {
-          const remote = await github.dispatch(id);
+          const remote = await cleanup.run(() => github.dispatch(id));
           response = {
             state: 'accepted',
             ...(/^\d+$/.test(String(remote?.runId ?? '')) ? { runId: String(remote.runId) } : {}),
@@ -1229,6 +1235,9 @@ export async function dispatchRequest({
           observedAt: now(),
           ...response,
         });
+        // Preserve the unknown submission history before stopping. Cleanup
+        // uncertainty must never become permission to submit again or fall back.
+        await cleanup.assertSafe();
       }
       records = await stateRecords(policy, stored);
     }

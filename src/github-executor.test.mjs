@@ -392,3 +392,35 @@ test('checked-in workflow is manual, private default-branch-only and uses truste
   assert.match(script, /--request "\$REQUEST_ID"/);
   assert.doesNotMatch(script, /CONTROL_REPO|EXECUTOR_CONFIG|worker\.mjs|source /);
 });
+
+
+for (const phase of ['availability', 'preflight', 'submission', 'observation']) {
+  test(`GitHub ${phase} sanitizes provider secrets while preserving cleanup uncertainty`, async t => {
+    const f = await fixture(t);
+    let fail = phase === 'availability' || phase === 'observation';
+    let posts = 0;
+    const executor = createGithubExecutor({ policy: f.policy, command: async (...args) => {
+      const post = args[1].includes('POST');
+      if (post) posts++;
+      if (fail && (phase !== 'submission' || post))
+        throw Object.assign(new Error('synthetic-private-token'), { cleanupIncomplete: true });
+      return f.command(...args);
+    } });
+    if (phase === 'preflight' || phase === 'submission') {
+      assert.equal((await executor.available()).available, true);
+      fail = true;
+    }
+    const action = phase === 'availability' ? executor.available()
+      : phase === 'observation' ? executor.observeRun({ runId: 456, workflowSha: sha })
+      : executor.dispatch(requestId);
+    await assert.rejects(action, error => {
+      assert.equal(error.cleanupIncomplete, true);
+      assert.doesNotMatch(error.message, /synthetic-private-token/);
+      return true;
+    });
+    if (phase === 'preflight' || phase === 'submission') {
+      await assert.rejects(executor.dispatch(requestId), /availability verification/);
+      assert.equal(posts, phase === 'submission' ? 1 : 0);
+    }
+  });
+}

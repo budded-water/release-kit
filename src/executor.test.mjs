@@ -16,6 +16,8 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runCommand } from './command.mjs';
 import { atomicJson, digest } from './state.mjs';
+import { createCleanupGuard } from './cleanup.mjs';
+import { createGithubExecutor } from './github-executor.mjs';
 import {
   createRequest,
   dispatchRequest,
@@ -739,4 +741,58 @@ test('a foreign request result with a valid checksum is rejected', async (t) => 
   result.requestDigest = 'f'.repeat(64);
   await atomicJson(join(f.requestDir, 'result.json'), { value: result, sha256: digest(result) });
   await assert.rejects(f.status(), /different request/);
+});
+
+
+for (const client of ['custom', 'built-in']) {
+  test(`direct dispatch preserves ${client} availability cleanup failures without local fallback`, async t => {
+    const f = await fixture(t);
+    const failure = () => Object.assign(new Error('synthetic-private-provider-detail'), { cleanupIncomplete: true });
+    let probes = 0;
+    const github = client === 'built-in'
+      ? createGithubExecutor({ policy: f.policy, command: async () => { probes++; throw failure(); } })
+      : { available: async () => { probes++; throw failure(); }, dispatch: () => assert.fail('Must not submit') };
+    await assert.rejects(f.dispatch({ github }), { cleanupIncomplete: true });
+    assert.equal(probes, 1);
+    assert.equal(f.executions(), 0);
+    assert.equal(f.validations(), 0);
+    assert.equal((await f.status()).state, 'pending');
+    await assert.rejects(createCleanupGuard(f.policy.stateDirectory).assertSafe(), { cleanupIncomplete: true });
+    await assert.rejects(f.dispatch({ github }), { cleanupIncomplete: true });
+    assert.equal(probes, 1);
+    assert.doesNotMatch(await readFile(join(f.policy.stateDirectory, 'locks', 'cleanup-incomplete.lock'), 'utf8'), /synthetic-private-provider-detail/);
+  });
+}
+
+test('direct dispatch with an existing fence never probes or submits remotely', async t => {
+  const f = await fixture(t);
+  await createCleanupGuard(f.policy.stateDirectory).capture(Object.assign(new Error('Synthetic cleanup'), { cleanupIncomplete: true }));
+  await assert.rejects(f.dispatch({ mode: 'github', github: {
+    available: () => assert.fail('Must not probe'), dispatch: () => assert.fail('Must not submit'),
+  } }), { cleanupIncomplete: true });
+  assert.equal(f.executions(), 0);
+  assert.equal((await f.status()).state, 'pending');
+});
+
+test('cleanup failure during remote submission records unknown and cannot submit again after operator recovery', async t => {
+  const f = await fixture(t);
+  let submissions = 0;
+  const github = {
+    available: async () => attestation,
+    dispatch: async () => {
+      submissions++;
+      throw Object.assign(new Error('synthetic-private-provider-detail'), { cleanupIncomplete: true });
+    },
+  };
+  await assert.rejects(f.dispatch({ github }), { cleanupIncomplete: true });
+  const response = await readFile(join(f.requestDir, 'dispatch-response.json'), 'utf8');
+  assert.equal(JSON.parse(response).value.state, 'unknown');
+  assert.doesNotMatch(response, /synthetic-private-provider-detail/);
+  assert.equal(f.executions(), 0);
+  await assert.rejects(f.dispatch({ github }), { cleanupIncomplete: true });
+  // Synthetic operator recovery permits observation, never another POST.
+  await rm(join(f.policy.stateDirectory, 'locks', 'cleanup-incomplete.lock'));
+  assert.equal((await f.dispatch({ mode: 'github', github })).state, 'pending');
+  assert.equal(submissions, 1);
+  assert.equal(f.executions(), 0);
 });
