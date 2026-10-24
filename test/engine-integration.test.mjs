@@ -8,7 +8,8 @@ import { createPlan } from '../src/plan.mjs';
 import { runCommand } from '../src/command.mjs';
 import { digest, loadState, releasePath } from '../src/state.mjs';
 import { main } from '../src/cli.mjs';
-import { createRequest, runRequest, inspectDispatchRequests } from '../src/executor.mjs';
+import { createRequest, dispatchRequest, runRequest, readRequestStatus, inspectDispatchRequests } from '../src/executor.mjs';
+import { workerMain } from '../src/worker.mjs';
 
 async function fixture(t, platforms = ['ios', 'android']) {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'release-engine-')));
@@ -261,4 +262,53 @@ test('settled cancellation stops later platforms but releases locks without a cl
   assert.equal(f.calls.includes('build-android'), false);
   assert.equal((await f.state()).stages['build-ios'].cleanupIncomplete, undefined);
   assert.deepEqual(await readdir(join(f.store, 'locks')), []);
+});
+
+test('GitHub worker SSH verification preserves cleanup uncertainty through sanitized errors before claiming', async t => {
+  const f = await fixture(t, ['ios']);
+  await runCommand('git', ['remote', 'set-url', 'origin', 'git@synthetic-alias:example/synthetic.git'], { cwd: f.repo });
+  const plan = await createPlan({ repo: f.repo, ref: 'HEAD', platforms: ['ios'], config: f.config });
+  const policy = {
+    schemaVersion: 1, repository: 'example/synthetic', controlRepository: f.repo,
+    releaseConfig: f.configPath, stateDirectory: f.store,
+    github: { enabled: true, workflow: 'release-local.yml', ref: 'main',
+      runnerName: 'synthetic-mac', runnerLabel: 'release-example', startTimeoutSeconds: 1, pollSeconds: 1 },
+  };
+  const policyPath = join(f.base, 'executor.json');
+  await writeFile(policyPath, JSON.stringify(policy));
+  const request = await createRequest({ policy, plan, operation: 'validate' });
+  await dispatchRequest({ policy, id: request.id, mode: 'github', github: {
+    async available() { return { available: true, workflowSha: plan.source, workflowDigest: 'b'.repeat(64), runnerId: '1' }; },
+    async dispatch() { return {}; },
+  } });
+  let sshCalls = 0;
+  await assert.rejects(workerMain({
+    repo: f.repo, project: f.project, platformAdapters: f.adapters,
+    args: ['--request', request.id, '--executor-config', policyPath],
+    environment: {
+      GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'workflow_dispatch',
+      GITHUB_REPOSITORY: policy.repository, GITHUB_REF: 'refs/heads/main',
+      GITHUB_WORKFLOW_REF: `${policy.repository}/.github/workflows/release-local.yml@refs/heads/main`,
+      RUNNER_NAME: policy.github.runnerName, RUNNER_ENVIRONMENT: 'self-hosted', RUNNER_OS: 'macOS',
+      GITHUB_SHA: plan.source, GITHUB_WORKFLOW_SHA: plan.source, GITHUB_RUN_ID: '1', GITHUB_RUN_ATTEMPT: '1',
+    },
+    async command(binary, args, options) {
+      if (binary === 'ssh') {
+        sshCalls++;
+        throw Object.assign(new Error('synthetic-private-ssh-config'), { cleanupIncomplete: true });
+      }
+      return runCommand(binary, args, options);
+    },
+    invoke() { assert.fail('An unverified worker cannot execute'); },
+    output() {},
+  }), error => {
+    assert.equal(error.cleanupIncomplete, true);
+    assert.doesNotMatch(error.message, /synthetic-private-ssh-config/);
+    return true;
+  });
+  assert.equal(sshCalls, 1);
+  assert.equal((await readRequestStatus({ policy, id: request.id })).state, 'pending');
+  const fence = await readFile(join(f.store, 'locks', 'cleanup-incomplete.lock'), 'utf8');
+  assert.doesNotMatch(fence, /synthetic-private-ssh-config/);
+  await assert.rejects(f.runner().validate(plan), { code: 'CLEANUP_INCOMPLETE' });
 });

@@ -119,8 +119,9 @@ release/resource/target locks, and creates an exclusive private
 the admission authority; stage error metadata is diagnostic history. Even if an
 adapter catches the command failure, it cannot report successful completion or
 launch another command through the supplied runner. New runners refuse execution
-in that store, dispatch completion remains unknown, and maintenance inventory
-reports a blocker. Local `status` remains readable. Partial or malformed fences
+in that store. A cleanup failure during claimed execution leaves its dispatch
+unknown; a failure before claiming leaves the request pending. Maintenance
+inventory reports a blocker. Local `status` remains readable. Partial or malformed fences
 also block admission; neither elapsed time nor PID disappearance clears one.
 
 Recovery is an operator procedure: stop admission through all entry points,
