@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { main as localMain } from './cli.mjs';
 import { runCommand } from './command.mjs';
 import { loadExecutorPolicy, runRequest } from './executor.mjs';
+import { createCleanupGuard } from './cleanup.mjs';
 import {
   assertExecutionPaths,
   dispatchExitCode,
@@ -46,8 +47,9 @@ export async function workerMain({
   process.once('SIGTERM', stop);
   signal?.addEventListener('abort', stop, { once: true });
   if (signal?.aborted) stop();
+  const cleanup = createCleanupGuard(policy.stateDirectory, command);
   const executeCommand = (binary, argv, options = {}) =>
-    command(binary, argv, {
+    cleanup.command(binary, argv, {
       ...options,
       signal: options.signal ? AbortSignal.any([abort.signal, options.signal]) : abort.signal,
     });

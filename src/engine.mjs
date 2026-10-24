@@ -1,7 +1,7 @@
 import { lstat, readFile, unlink } from 'node:fs/promises';
 import { delimiter, dirname, join } from 'node:path';
 import {
-  acquireLock,
+  acquireLock as acquireStateLock,
   atomicJson,
   digest,
   loadState,
@@ -19,6 +19,8 @@ import {
 } from './plan.mjs';
 import { prepareStoreContent } from './store-content.mjs';
 import { requireProject } from './project.mjs';
+import { createCleanupGuard } from './cleanup.mjs';
+import { runCommand } from './command.mjs';
 
 const now = () => new Date().toISOString();
 function assertNativeWorkspace(directory) {
@@ -65,12 +67,21 @@ export function createRunner({
   repo,
   store,
   config,
-  command,
+  command = runCommand,
   adapters,
   project,
   environment = process.env,
   signal,
 }) {
+  const cleanup = createCleanupGuard(store, command);
+  command = cleanup.command;
+  const acquireLock = async (path) => {
+    await cleanup.assertSafe();
+    const unlock = await acquireStateLock(path);
+    return async () => {
+      if (!cleanup.blocked) await unlock();
+    };
+  };
   const env = {
     ...environment,
     EXPO_NO_DOTENV: '1',
@@ -93,6 +104,7 @@ export function createRunner({
     task,
     { sideEffect = false, reconcile = false, repeat = false } = {},
   ) {
+    await cleanup.assertSafe();
     if (signal?.aborted) throw new Error('Release execution interrupted');
     const previous = state.stages[key];
     if (previous?.status === 'succeeded' && !repeat) return previous.output;
@@ -107,7 +119,7 @@ export function createRunner({
     };
     await saveState(directory, state);
     try {
-      const output = await task();
+      const output = await cleanup.run(task);
       state.stages[key] = {
         ...state.stages[key],
         status: 'succeeded',
@@ -122,12 +134,14 @@ export function createRunner({
         status: sideEffect ? 'unknown' : 'failed',
         finishedAt: now(),
         error: errorMessage(error),
+        ...(error.cleanupIncomplete === true ? { cleanupIncomplete: true } : {}),
       };
       await saveState(directory, state);
       throw error;
     }
   }
   async function verifyProductionSource(state, directory, platform, root, operation) {
+    await cleanup.assertSafe();
     if (!['ios', 'android'].includes(platform)) return;
     let verification;
     try {
@@ -177,7 +191,8 @@ export function createRunner({
       throw new Error('Missing or mismatched artifact');
     const hash = digest(await readFile(artifact.path));
     if (hash !== artifact.sha256) throw new Error('Artifact changed after inspection');
-    const fresh = await adapters[platform].inspect(context(state, directory, platform, root));
+    const fresh = await cleanup.run(() =>
+      adapters[platform].inspect(context(state, directory, platform, root)));
     if (
       fresh.sha256 !== artifact.sha256 ||
       fresh.appId !== artifact.appId ||
@@ -192,7 +207,7 @@ export function createRunner({
     // Explicit semantic identity covers trusted hook dependencies, not just their
     // function text. Legacy adapters remain executable but cannot reuse a pass.
     const policy = hooks.sourceValidationPolicy === undefined ? null : digest({
-      contract: 'release-kit/source-validation/v1',
+      contract: 'release-kit/source-validation/v2',
       project: hooks.sourceValidationPolicy,
       node: process.version,
     });
@@ -268,14 +283,27 @@ export function createRunner({
       if (signal?.aborted) throw new Error('Release execution interrupted');
       return evidence;
     });
-    await assertCheckout(root, state.plan.source, command);
-    const evidence = state.stages['ui-eval'].output;
-    // Recheck the receipt and its referenced reports on resume, before any build.
-    if (digest(await readFile(evidence.path)) !== evidence.sha256)
-      throw new Error('Recorded UI-eval evidence has changed');
-    await hooks.revalidateUI({ ...projectContext(root, state.plan.source), evidence });
-    if (signal?.aborted) throw new Error('Release execution interrupted');
-    return evidence;
+    try {
+      await assertCheckout(root, state.plan.source, command);
+      const evidence = state.stages['ui-eval'].output;
+      // A historical pass is reusable only after current evidence validation.
+      if (digest(await readFile(evidence.path)) !== evidence.sha256)
+        throw new Error('Recorded UI-eval evidence has changed');
+      await hooks.revalidateUI({ ...projectContext(root, state.plan.source), evidence });
+      if (signal?.aborted) throw new Error('Release execution interrupted');
+      return evidence;
+    } catch (error) {
+      await cleanup.capture(error);
+      state.stages['ui-eval'] = {
+        ...state.stages['ui-eval'],
+        status: 'invalidated',
+        invalidatedAt: now(),
+        reason: 'ui-evidence-unverified',
+        ...(error.cleanupIncomplete === true ? { cleanupIncomplete: true } : {}),
+      };
+      await saveState(directory, state);
+      throw error;
+    }
   }
   async function validateGates(state, directory, ui) {
     if (ui) {
@@ -296,7 +324,7 @@ export function createRunner({
       const unlock = await acquireLock(join(store, 'locks', 'ui-eval.lock'));
       try {
         const evidenceReused = state.stages['ui-eval']?.status === 'succeeded';
-        const evidence = await validateUI(state, directory, root);
+        const evidence = await cleanup.run(() => validateUI(state, directory, root));
         if (signal?.aborted) throw new Error('Release execution interrupted');
         state.uiValidation = {
           ...state.uiValidation,
@@ -484,14 +512,14 @@ export function createRunner({
         return false;
       let observation;
       if (!unpublished) {
-        observation = await adapters[platform].status(
+        observation = await cleanup.run(() => adapters[platform].status(
           context(
             previous,
             previousDirectory,
             platform,
             checkoutDirectory(previous, previousDirectory, platform),
           ),
-        );
+        ));
         previous.observations ??= {};
         previous.observations[platform] = observation;
         previous.observedAt = now();
@@ -640,6 +668,7 @@ export function createRunner({
         claimedAt: now(),
       });
       return async ({ relinquish = false } = {}) => {
+        if (cleanup.blocked) return;
         try {
           if (relinquish) {
             const current = await readJson(ownerPath);
@@ -657,6 +686,7 @@ export function createRunner({
     }
   }
   async function withRelease(plan, task) {
+    await cleanup.assertSafe();
     const directory = releasePath(store, plan.id);
     await privateDirectory(directory);
     const unlock = await acquireLock(join(store, 'locks', `${plan.id}.lock`));
@@ -675,7 +705,7 @@ export function createRunner({
         acceptance: {},
         outcomes: {},
       };
-      return await task(state, directory);
+      return await cleanup.run(() => task(state, directory));
     } finally {
       await unlock();
     }
@@ -698,7 +728,7 @@ export function createRunner({
             throw new Error('Apply requires the exact reviewed content approval digest');
           await verifyProductionSource(state, directory, platform, root, 'store-content');
         }
-        const report = await prepareStoreContent(
+        const report = await cleanup.run(() => prepareStoreContent(
           {
             ...context(state, directory, platform, root),
             savePreparation: async (record) => {
@@ -712,7 +742,7 @@ export function createRunner({
             },
           },
           { mode, approval },
-        );
+        ));
         return {
           operation: `store-${mode}`,
           releaseId: plan.id,
@@ -924,9 +954,9 @@ export function createRunner({
           let relinquish = false;
           try {
             if (observeOnly) {
-              state.outcomes[platform] = await adapters[platform].status(
+              state.outcomes[platform] = await cleanup.run(() => adapters[platform].status(
                 context(state, directory, platform, root),
-              );
+              ));
             } else {
               state.outcomes[platform] = await step(
                 state,
@@ -950,6 +980,8 @@ export function createRunner({
           }
         } catch (error) {
           state.outcomes[platform] = { state: 'blocked', message: errorMessage(error) };
+          await cleanup.capture(error);
+          await cleanup.assertSafe();
         } finally {
           await saveState(directory, state);
         }
@@ -972,11 +1004,13 @@ export function createRunner({
       for (const platform of state.plan.platforms) {
         observationSignal?.throwIfAborted();
         try {
-          observed[platform] = await adapters[platform].status({
+          observed[platform] = await cleanup.run(() => adapters[platform].status({
             ...context(state, directory, platform, checkoutDirectory(state, directory, platform)),
             signal: observationSignal,
-          });
+          }));
         } catch (error) {
+          await cleanup.capture(error);
+          await cleanup.assertSafe();
           observationSignal?.throwIfAborted();
           observed[platform] = { state: 'unknown', message: errorMessage(error) };
         }
@@ -1097,7 +1131,7 @@ export function createRunner({
             assertPublicationSource: readOnly,
             checkpoint: readOnly,
           });
-          const observation = await adapters[platform].status(ctx);
+          const observation = await cleanup.run(() => adapters[platform].status(ctx));
           signal?.throwIfAborted();
           report.observations[platform] = {
             ...observationSummary(observation),
@@ -1108,7 +1142,9 @@ export function createRunner({
               buildNumber: String(artifact.buildNumber),
             },
           };
-        } catch {
+        } catch (error) {
+          await cleanup.capture(error);
+          await cleanup.assertSafe();
           signal?.throwIfAborted();
           report.observations[platform] = {
             state: 'unavailable',

@@ -83,7 +83,7 @@ export function summarizeStatus(operation, value) {
     stages: Object.fromEntries(
       Object.entries(value.stages ?? {}).map(([name, stage]) => [
         name,
-        pick(stage, ['status', 'startedAt', 'finishedAt', 'error']),
+        pick(stage, ['status', 'startedAt', 'finishedAt', 'error', 'cleanupIncomplete', 'invalidatedAt', 'reason']),
       ]),
     ),
     ...Object.fromEntries(

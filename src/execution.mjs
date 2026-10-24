@@ -70,8 +70,12 @@ async function assertRepository(origin, repository, command, cwd) {
       )
         throw mismatch();
     }
-  } catch {
-    // SSH config output may contain private key and proxy paths.
+  } catch (error) {
+    // Preserve cleanup uncertainty without exposing SSH config or private paths.
+    if (error?.cleanupIncomplete === true)
+      throw Object.assign(new Error('Repository verification could not confirm subprocess cleanup'), {
+        cleanupIncomplete: true,
+      });
     throw mismatch();
   }
 }

@@ -7,6 +7,7 @@ import { atomicJson, digest, privateDirectory, readJson } from './state.mjs';
 import { runCommand } from './command.mjs';
 import { assertMaintenanceOwner } from './coordination.mjs';
 import { dedicatedRunnerLabel } from './runner-policy.mjs';
+import { createCleanupGuard } from './cleanup.mjs';
 
 const SHA = /^[a-f0-9]{64}$/;
 const COMMIT = /^[a-f0-9]{40}$/;
@@ -923,11 +924,16 @@ export async function inspectDispatchRequests({ stateDirectory } = {}) {
   } catch {
     return { clear: false, requests, blockers: [{ reason: 'invalid-state-directory' }] };
   }
+  try {
+    await createCleanupGuard(stateDirectory).assertSafe();
+  } catch {
+    blockers.push({ reason: 'cleanup-incomplete' });
+  }
   const dispatch = join(stateDirectory, 'dispatch');
   try {
     await lstat(dispatch);
   } catch (error) {
-    if (error.code === 'ENOENT') return { clear: true, requests, blockers };
+    if (error.code === 'ENOENT') return { clear: blockers.length === 0, requests, blockers };
     return { clear: false, requests, blockers: [{ reason: 'invalid-dispatch-directory' }] };
   }
   let names;
@@ -1040,6 +1046,8 @@ export async function runRequest({
   signal,
 }) {
   const policy = normalizePolicy(inputPolicy);
+  const cleanup = createCleanupGuard(policy.stateDirectory, command);
+  command = cleanup.command;
   if (!['local', 'github'].includes(executor)) throw new Error('Invalid request executor');
   const retired = await retiredRequestStatus(policy, id);
   if (retired) return retired;
@@ -1052,7 +1060,7 @@ export async function runRequest({
   if (typeof validate !== 'function' || typeof execute !== 'function')
     throw new Error('Dispatch execution requires validation and execution callbacks');
   await validateInputs(stored.value, command);
-  await validate(structuredClone(stored.value));
+  await cleanup.run(() => validate(structuredClone(stored.value)));
   // The callback can take time. Recheck all pinned bytes before competing for the claim.
   if ((await requestRecord(policy, id)).sha256 !== stored.sha256)
     throw new Error('Dispatch manifest changed during validation');
@@ -1077,7 +1085,7 @@ export async function runRequest({
   let result;
   try {
     interrupted(signal);
-    const outcome = await execute(structuredClone(stored.value));
+    const outcome = await cleanup.run(() => execute(structuredClone(stored.value)));
     if (
       !object(outcome) ||
       !Number.isInteger(outcome.exitCode) ||
@@ -1136,8 +1144,14 @@ function availability(value) {
   };
 }
 
-export async function dispatchRequest({
-  policy: inputPolicy,
+export async function dispatchRequest(options) {
+  const policy = normalizePolicy(options.policy);
+  const cleanup = createCleanupGuard(policy.stateDirectory, options.command ?? runCommand);
+  return cleanup.run(() => dispatchWithGuard({ ...options, policy, command: cleanup.command }, cleanup));
+}
+
+async function dispatchWithGuard({
+  policy,
   id,
   mode,
   github,
@@ -1146,8 +1160,7 @@ export async function dispatchRequest({
   signal,
   wait = (milliseconds, abortSignal) => delay(milliseconds, undefined, { signal: abortSignal }),
   command = runCommand,
-}) {
-  const policy = normalizePolicy(inputPolicy);
+}, cleanup) {
   if (!['auto', 'github'].includes(mode)) throw new Error('Dispatch mode must be auto or github');
   const retired = await retiredRequestStatus(policy, id);
   if (retired) return retired;
@@ -1161,8 +1174,9 @@ export async function dispatchRequest({
     let available = null;
     if (policy.github.enabled) {
       try {
-        available = availability(await github.available());
-      } catch {
+        available = availability(await cleanup.run(() => github.available()));
+      } catch (error) {
+        if (error?.cleanupIncomplete === true) throw error;
         // API/auth/network failure proves neither capacity nor a running worker.
       }
     }
@@ -1201,7 +1215,7 @@ export async function dispatchRequest({
         interrupted(signal);
         let response;
         try {
-          const remote = await github.dispatch(id);
+          const remote = await cleanup.run(() => github.dispatch(id));
           response = {
             state: 'accepted',
             ...(/^\d+$/.test(String(remote?.runId ?? '')) ? { runId: String(remote.runId) } : {}),
@@ -1221,6 +1235,9 @@ export async function dispatchRequest({
           observedAt: now(),
           ...response,
         });
+        // Preserve the unknown submission history before stopping. Cleanup
+        // uncertainty must never become permission to submit again or fall back.
+        await cleanup.assertSafe();
       }
       records = await stateRecords(policy, stored);
     }

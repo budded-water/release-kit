@@ -18,6 +18,8 @@ import { waitForReleaseStatus } from './polling.mjs';
 import { inspectProviders } from './inspection.mjs';
 import { observeTargets, validateObservationTargets } from './observation-sweep.mjs';
 import { summarizeStatus } from './summary.mjs';
+import { releaseExitCode } from './outcomes.mjs';
+import { createCleanupGuard } from './cleanup.mjs';
 
 const defaultRoot = process.cwd();
 const help = `Release CLI (one designated Mac and state store)
@@ -310,8 +312,9 @@ export async function main({
   signal?.addEventListener('abort', stop, { once: true });
   if (signal?.aborted) stop();
   let diagnosticsDirectory;
+  const cleanup = createCleanupGuard(store, executeCommand);
   const command = (binary, argv, options = {}) =>
-    executeCommand(binary, argv, {
+    cleanup.command(binary, argv, {
       ...options,
       signal: options.signal ? AbortSignal.any([abort.signal, options.signal]) : abort.signal,
       logDirectory: diagnosticsDirectory ?? options.logDirectory,
@@ -515,7 +518,7 @@ export async function main({
         throw new Error('Doctor checks the current checkout; use plan to inspect another ref');
       const results = {};
       for (const platform of plan.platforms)
-        results[platform] = await adapters[platform].doctor({
+        results[platform] = await cleanup.run(() => adapters[platform].doctor({
           root: repo,
           repoRoot: repo,
           platform,
@@ -524,7 +527,7 @@ export async function main({
           env: environment,
           command,
           publicationRequested: values.publish,
-        });
+        }));
       output(
         JSON.stringify(
           {
@@ -666,22 +669,7 @@ export async function main({
         2,
       ),
     );
-    return interrupted
-      ? 130
-      : Object.values(state.outcomes).some((result) =>
-            [
-              'blocked',
-              'unknown',
-              'unavailable',
-              'rejected',
-              'failed',
-              'awaiting_acceptance',
-              'pending_operator',
-              'pending-release',
-            ].includes(result.state),
-          )
-        ? 2
-        : 0;
+    return interrupted ? 130 : releaseExitCode(state);
   } finally {
     signal?.removeEventListener('abort', stop);
     process.removeListener('SIGINT', stop);

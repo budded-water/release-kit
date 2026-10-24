@@ -116,6 +116,17 @@ test("two synthetic consumers select their own checks without changing core or s
   }
 });
 
+test("direct library consumers can validate source and UI without a command override", async t => {
+  const f = await fixture(t, "default-command");
+  const runner = createRunner({ ...f, command: undefined });
+  const source = await runner.validate(f.plan);
+  assert.equal(source.sourceValidation.state, "passed");
+  const ui = await runner.validate(f.plan, { ui: true });
+  assert.equal(ui.sourceValidation.checksReused, true);
+  assert.equal(ui.uiValidation.state, "passed");
+  assert.deepEqual(f.calls, ["install", "check", "evaluate", "revalidate"]);
+});
+
 test("UI reuse revalidates project evidence and tampering revokes the current pass", async (t) => {
   const f = await fixture(t, "evidence");
   const first = await f.runner().validate(f.plan, { ui: true });
@@ -127,7 +138,57 @@ test("UI reuse revalidates project evidence and tampering revokes the current pa
   await assert.rejects(f.runner().validate(f.plan, { ui: true }), /changed/);
   const stored = await loadState(releasePath(f.store, f.plan.id));
   assert.equal(stored.uiValidation.state, "failed");
+  assert.equal(stored.stages["ui-eval"].status, "invalidated");
+  const recovered = await f.runner().validate(f.plan, { ui: true });
+  assert.equal(recovered.uiValidation.state, "passed");
+  assert.equal(recovered.uiValidation.evidenceReused, false);
+  assert.equal(f.calls.filter((x) => x === "evaluate").length, 2);
   assert.deepEqual(await readdir(join(f.store, "locks")), []);
+});
+
+test("missing UI receipts and changed verifier requirements regenerate without resetting delivery history", async (t) => {
+  for (const variant of ["missing", "verifier-change"]) {
+    const f = await fixture(t, variant);
+    const first = await f.runner().validate(f.plan, { ui: true });
+    const preserved = await seedDeliveryHistory(f);
+    if (variant === "missing") {
+      await rm(first.uiValidation.evidence.path);
+    } else {
+      const evaluate = f.project.evaluateUI;
+      f.project.evaluateUI = async ctx => ({ ...await evaluate(ctx), verifier: "v2" });
+      const revalidate = f.project.revalidateUI;
+      f.project.revalidateUI = async ctx => {
+        if (ctx.evidence.verifier !== "v2") throw new Error("Verifier v2 evidence required");
+        await revalidate(ctx);
+      };
+    }
+    await assert.rejects(f.runner().validate(f.plan, { ui: true }));
+    const invalidated = await preserved();
+    assert.equal(invalidated.schemaVersion, 1);
+    assert.equal(invalidated.stages["ui-eval"].status, "invalidated");
+    assert.deepEqual(invalidated.stages["ui-eval"].output, first.uiValidation.evidence);
+    const recovered = await f.runner().validate(f.plan, { ui: true });
+    assert.equal(recovered.uiValidation.state, "passed");
+    assert.equal(recovered.uiValidation.evidenceReused, false);
+    assert.equal(recovered.stages["ui-eval"].attempt, 2);
+    await preserved();
+    const reused = await f.runner().validate(f.plan, { ui: true });
+    assert.equal(reused.uiValidation.evidenceReused, true);
+    assert.equal(f.calls.filter(x => x === "evaluate").length, 2);
+  }
+});
+
+test("failed replacement UI evaluation cannot restore a historical pass", async t => {
+  const f = await fixture(t, "ui-replacement");
+  const initial = await f.runner().validate(f.plan, { ui: true });
+  await rm(initial.uiValidation.evidence.path);
+  await assert.rejects(f.runner().validate(f.plan, { ui: true }));
+  f.project.evaluateUI = async () => { throw new Error("Replacement UI failed"); };
+  await assert.rejects(f.runner().validate(f.plan, { ui: true }), /Replacement UI failed/);
+  const state = await loadState(releasePath(f.store, f.plan.id));
+  assert.equal(state.uiValidation.state, "failed");
+  assert.equal(state.stages["ui-eval"].status, "failed");
+  assert.equal(state.stages["ui-eval"].output, undefined);
 });
 
 test("project check failures and absent adapters cannot become release acceptance", async (t) => {
@@ -317,6 +378,29 @@ test("legacy adapters without a declared policy remain usable but never cache a 
     "install",
     "check",
   ]);
+});
+
+test("pre-cleanup core fingerprints revalidate once while preserving schema v1 delivery history", async t => {
+  const f = await fixture(t, "core-migration");
+  await f.runner().validate(f.plan);
+  const directory = releasePath(f.store, f.plan.id);
+  const state = await loadState(directory);
+  const oldPolicy = digest({
+    contract: 'release-kit/source-validation/v1',
+    project: f.project.sourceValidationPolicy,
+    node: process.version,
+  });
+  state.sourceValidation.policy = oldPolicy;
+  for (const key of ['install-validation', 'checks']) state.stages[key].output.policy = oldPolicy;
+  await saveState(directory, state);
+  const preserved = await seedDeliveryHistory(f);
+  const upgraded = await f.runner().validate(f.plan);
+  assert.equal(upgraded.schemaVersion, 1);
+  assert.notEqual(upgraded.sourceValidation.policy, oldPolicy);
+  assert.equal(upgraded.sourceValidation.checksReused, false);
+  assert.equal((await f.runner().validate(f.plan)).sourceValidation.checksReused, true);
+  assert.deepEqual(f.calls, ['install', 'check', 'install', 'check']);
+  await preserved();
 });
 
 test("replacement install failure revokes old checks before work and rollback must revalidate", async (t) => {

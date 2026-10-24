@@ -1,7 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
-
-const waitingStates = new Set(['processing', 'submitted', 'in-review', 'released']);
+import { classifyOutcome } from './outcomes.mjs';
 
 function boundedMilliseconds(value, maximum, name) {
   if (!Number.isInteger(value) || value < 1 || value > maximum)
@@ -30,11 +29,10 @@ function classify(state) {
   )
     throw new Error('Release status polling requires selected platforms and remote observations');
   const verified = (platform) =>
-    state.observations[platform]?.state === 'available' &&
-    state.observations[platform]?.availabilityVerified === true;
+    classifyOutcome(state.observations[platform]) === 'available';
   if (platforms.every(verified)) return { reason: 'available' };
   const actionRequiredPlatforms = platforms.filter(
-    (platform) => !verified(platform) && !waitingStates.has(state.observations[platform]?.state),
+    (platform) => !verified(platform) && classifyOutcome(state.observations[platform]) !== 'waiting',
   );
   return actionRequiredPlatforms.length
     ? { reason: 'action-required', actionRequiredPlatforms }
