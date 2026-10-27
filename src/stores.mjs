@@ -8,6 +8,7 @@ import { AppleListingError, auditAppleListing } from './apple-readiness.mjs';
 const APPLE = 'https://api.appstoreconnect.apple.com';
 const GOOGLE = 'https://androidpublisher.googleapis.com';
 const OAUTH = 'https://oauth2.googleapis.com/token';
+const IAM = 'https://iamcredentials.googleapis.com';
 const now = () => new Date().toISOString();
 const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
 const segment = (value) => encodeURIComponent(String(value));
@@ -164,9 +165,9 @@ function result(ctx, state, values = {}) {
 async function request(ctx, url, token, options = {}) {
   ctx.signal?.throwIfAborted();
   const origin = new URL(url).origin;
-  if (![APPLE, GOOGLE, new URL(OAUTH).origin].includes(origin))
+  if (![APPLE, GOOGLE, IAM, new URL(OAUTH).origin].includes(origin))
     throw new StoreError('Provider URL is outside the allowed origins.');
-  const bearer = typeof token === 'function' ? token() : token;
+  const bearer = typeof token === 'function' ? await token() : token;
   const headers = { ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}), ...options.headers };
   let response;
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 60000);
@@ -259,7 +260,101 @@ async function appleToken(ctx, cfg) {
   };
 }
 
+function googleAuthSettings(ctx, cfg) {
+  if (cfg.auth === undefined) return null; // Legacy JSON credentials remain compatible.
+  const auth = cfg.auth;
+  if (!auth || auth.type !== 'gcloud-impersonation' || cfg.serviceAccountPathEnv)
+    throw new StoreError('Select exactly one supported Google authentication mode.');
+  const email = /^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
+  if (typeof auth.account !== 'string' || typeof auth.serviceAccount !== 'string' ||
+      !email.test(auth.account) ||
+      !/^[a-z0-9][a-z0-9-]*@[a-z0-9][a-z0-9.-]*\.iam\.gserviceaccount\.com$/.test(auth.serviceAccount ?? ''))
+    throw new StoreError('Explicit Google source account and target service account are required.');
+  const directory = ctx.env?.[auth.configurationDirectoryEnv];
+  if (!auth.configurationDirectoryEnv || !directory || !path.isAbsolute(directory))
+    throw new StoreError('Google CLI configuration must reference an absolute private directory.');
+  const binary = auth.gcloudBinary ?? 'gcloud';
+  if (binary !== 'gcloud' && !path.isAbsolute(binary))
+    throw new StoreError('Custom Google CLI executable must use an absolute path.');
+  return { ...auth, directory, binary };
+}
+
+async function credentialReference(ctx, cfg, inspection = false) {
+  const auth = ctx.platform === 'android' ? googleAuthSettings(ctx, cfg) : null;
+  const file = auth ? auth.directory : secretPath(ctx, cfg);
+  let info;
+  try {
+    info = await stat(file);
+    await access(file, constants.R_OK);
+  } catch {
+    throw new StoreError('Store credential reference is unavailable or unreadable.');
+  }
+  if (auth ? !info.isDirectory() : !info.isFile())
+    throw new StoreError('Store credential reference has the wrong file type.');
+  if (!auth && inspection && info.size > 1024 * 1024)
+    throw new StoreError('Store credential file exceeds the inspection limit of 1 MiB.');
+  return auth;
+}
+
+async function googleImpersonatedToken(ctx, cfg, auth) {
+  let cached, expires = 0;
+  const getToken = async () => {
+    ctx.signal?.throwIfAborted();
+    const time = ctx.now?.() ?? Date.now();
+    if (cached && time < expires - 60000) return cached;
+    let result;
+    try {
+      if (typeof ctx.command !== 'function') throw new Error('Missing command runner');
+      result = await ctx.command(auth.binary,
+        ['auth', 'print-access-token', '--account', auth.account, '--quiet'], {
+          env: { ...Object.fromEntries(Object.entries(ctx.env ?? {}).filter(([key]) => !key.startsWith('CLOUDSDK_'))), CLOUDSDK_CONFIG: auth.directory,
+            CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT: '',
+            CLOUDSDK_CORE_DISABLE_PROMPTS: '1' },
+          signal: ctx.signal, sensitive: true, diagnostics: false,
+          maxBuffer: 32768, timeoutMs: 30000,
+        });
+    } catch (error) {
+      const failure = new StoreError('Google CLI authentication failed; complete login locally before retrying.');
+      if (error?.cleanupIncomplete) failure.cleanupIncomplete = true;
+      throw failure;
+    }
+    ctx.signal?.throwIfAborted();
+    const sourceToken = result?.stdout?.trim();
+    if (result?.code !== 0 || !sourceToken || sourceToken.length > 16384 ||
+        !/^[A-Za-z0-9._~+\/-]+=*$/.test(sourceToken))
+      throw new StoreError('Google CLI did not return a valid access token.');
+    let response;
+    try {
+      response = await request(ctx, googleImpersonationUrl(auth), sourceToken, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope: ['https://www.googleapis.com/auth/androidpublisher'], lifetime: '3600s' }),
+      });
+    } catch {
+      // IAM failures are not Play resource observations: never let an IAM 404
+      // retire an owned Play edit or authorize a new publication owner.
+      throw new StoreError('Google impersonation failed; verify IAM access before retrying.');
+    }
+    const expiry = Date.parse(response?.expireTime);
+    if (typeof response?.accessToken !== 'string' || !/^[A-Za-z0-9._~+\/-]+=*$/.test(response.accessToken) ||
+        response.accessToken.length > 16384 || !Number.isFinite(expiry) ||
+        expiry <= time + 60000 || expiry > time + 3660000)
+      throw new StoreError('Google impersonation returned an invalid or expired access token.');
+    cached = response.accessToken;
+    expires = expiry;
+    return cached;
+  };
+  // Authenticate before callers persist their first external-write intent.
+  await getToken();
+  return getToken;
+}
+
+function googleImpersonationUrl(auth) {
+  return `${IAM}/v1/projects/-/serviceAccounts/${segment(auth.serviceAccount)}:generateAccessToken`;
+}
+
 async function googleToken(ctx, cfg) {
+  const auth = googleAuthSettings(ctx, cfg);
+  if (auth) return googleImpersonatedToken(ctx, cfg, auth);
   const key = await credentials(ctx, cfg);
   if (!key.client_email || !key.private_key)
     throw new StoreError('Google service account JSON is incomplete.');
@@ -1184,15 +1279,14 @@ export async function doctorStore(ctx) {
         checks.push({ name: 'android managed publishing', ok: false, message: error.message });
       }
       try {
-        const file = secretPath(ctx, cfg);
-        if (!(await stat(file)).isFile())
-          throw new StoreError('Store credential reference must resolve to a regular file.');
-        await access(file, constants.R_OK);
+        const auth = await credentialReference(ctx, cfg);
         checks.push({
           name: 'android store credentials',
           ok: true,
           message:
-            'Credential file is locally readable; its contents and remote permissions have not been tested.',
+            auth
+              ? 'Google CLI configuration directory is readable; login, impersonation and Play permissions have not been tested.'
+              : 'Credential file is locally readable; its contents and remote permissions have not been tested.',
         });
       } catch (error) {
         checks.push({
@@ -1492,18 +1586,7 @@ export async function inspectStore(ctx) {
       message: 'Configured app matches the supplied project identity.',
     });
     checkName = 'provider read';
-    const credential = secretPath(ctx, cfg);
-    let credentialInfo;
-    try {
-      credentialInfo = await stat(credential);
-      await access(credential, constants.R_OK);
-    } catch {
-      throw new StoreError('Store credential file reference is unavailable or unreadable.');
-    }
-    if (!credentialInfo.isFile())
-      throw new StoreError('Store credential reference must resolve to a regular file.');
-    if (credentialInfo.size > 1024 * 1024)
-      throw new StoreError('Store credential file exceeds the inspection limit of 1 MiB.');
+    const auth = await credentialReference(ctx, cfg, true);
     ctx.signal?.throwIfAborted();
     const transport = ctx.fetch ?? fetch;
     let requests = 0;
@@ -1517,7 +1600,7 @@ export async function inspectStore(ctx) {
           ++requests > 101 ||
           !(
             (method === 'GET' && [APPLE, GOOGLE].includes(origin)) ||
-            (method === 'POST' && url === OAUTH)
+            (method === 'POST' && (url === OAUTH || (auth && url === googleImpersonationUrl(auth))))
           )
         )
           throw new StoreError(
@@ -1563,6 +1646,7 @@ export async function inspectStore(ctx) {
     });
     report.ok = true;
   } catch (error) {
+    if (error?.cleanupIncomplete) throw error;
     ctx.signal?.throwIfAborted();
     report.checks.push({
       name: checkName,

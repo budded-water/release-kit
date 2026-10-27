@@ -12,6 +12,7 @@ import {
 } from './store-content.mjs';
 import { digest } from './state.mjs';
 import { main } from './cli.mjs';
+import { contentSession } from './stores.mjs';
 
 const clone = (x) => structuredClone(x);
 async function fixture(t, platform = 'ios', { screenshots = true, existing = true } = {}) {
@@ -537,4 +538,29 @@ test('malformed Play expiry cannot establish a prepared edit', async (t) => {
     verifyPreparedPlayContent(f.ctx, f.ctx.preparation.edit),
     /expired or changed/,
   );
+});
+
+
+test('repairing initial keyless login failure can retry content apply without an orphan edit intent', async t => {
+  const f=await fixture(t,'android',{screenshots:false});
+  await f.plan();
+  f.ctx.config.stores.android.packageName='example.app';
+  f.ctx.config.stores.android.auth={type:'gcloud-impersonation',account:'operator@example.com',
+    serviceAccount:'publisher@example-project.iam.gserviceaccount.com',configurationDirectoryEnv:'CLI_CONFIG'};
+  delete f.ctx.config.stores.android.serviceAccountPathEnv;
+  f.ctx.env={CLI_CONFIG:f.ctx.root};
+  let broken=true;
+  const command=f.ctx.command;
+  f.ctx.command=async(bin,...args)=>{if(bin!=='gcloud')return command(bin,...args);if(broken)throw new Error('private-login-output');return {code:0,stdout:'source-token'};};
+  f.ctx.fetch=async()=>({ok:true,status:200,json:async()=>({accessToken:'target-token',expireTime:new Date(Date.now()+3600000).toISOString()})});
+  // Use the real authentication boundary before the existing synthetic content provider.
+  f.ctx.session=async ctx=>{await contentSession(ctx);return f.api;};
+  const before=JSON.stringify(f.ctx.preparation);
+  await assert.rejects(f.apply(),/authentication failed/);
+  assert.equal(JSON.stringify(f.ctx.preparation),before);
+  assert.equal(f.writes.length,0);
+  broken=false;
+  const result=await f.apply();
+  assert.equal(result.status,'prepared');
+  assert.equal(f.writes.filter(x=>x.method==='POST'&&x.path==='edits').length,1);
 });

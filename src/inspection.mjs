@@ -12,6 +12,7 @@ export async function inspectProviders({
   platforms = ['ios', 'android'],
   environment = process.env,
   inspector = inspectStore,
+  command,
   signal,
 }) {
   const report = {
@@ -116,9 +117,11 @@ export async function inspectProviders({
         plan,
         env: environment,
         signal,
+        command,
       });
       signal?.throwIfAborted();
-    } catch {
+    } catch (error) {
+      if (error?.cleanupIncomplete) throw error;
       signal?.throwIfAborted();
       report.results[platform] = {
         supported: true,
