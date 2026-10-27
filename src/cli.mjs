@@ -332,6 +332,7 @@ export async function main({
             platforms: selectPlatforms(values.platforms ?? 'ios,android'),
             environment,
             inspector: providerInspector,
+            command,
             signal: observationSignal,
           });
           output(JSON.stringify(report, null, 2));

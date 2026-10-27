@@ -105,6 +105,57 @@ execution progress, not store availability. `pending-review`, `pending-release`,
 Adapters must use these explicit outcomes. Polling uses the same classification
 but succeeds only when all selected platforms have verified availability.
 
+## Google Play keyless authentication
+
+The existing `stores.android.serviceAccountPathEnv` JSON-key mode remains supported.
+Alternatively, select keyless impersonation explicitly in private configuration:
+
+```json
+{
+  "stores": {
+    "android": {
+      "packageName": "com.example.app",
+      "managedPublishingDisabled": true,
+      "auth": {
+        "type": "gcloud-impersonation",
+        "account": "operator@example.com",
+        "serviceAccount": "publisher@example-project.iam.gserviceaccount.com",
+        "configurationDirectoryEnv": "RELEASE_GOOGLE_CLI_CONFIG"
+      }
+    }
+  }
+}
+```
+
+The named environment variable must resolve to an absolute private Google CLI
+configuration directory with an existing authorized login. `gcloudBinary` may
+optionally name an absolute official CLI executable; otherwise `gcloud` is
+resolved from the trusted operator PATH. Do not configure both authentication
+modes. Setup/login and granting IAM or Play permissions remain operator work;
+the runner does not log in, change the active account, create a key or alter
+organization policy. Use the explicitly configured source account and target
+service account, with Token Creator permission on the target and separate Play
+Console application permissions.
+
+The runner obtains the existing account token through
+[`gcloud auth print-access-token`](https://docs.cloud.google.com/sdk/gcloud/reference/auth/print-access-token)
+without a shell, then calls the exact target's
+[IAM generateAccessToken](https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken)
+with only the Android Publisher scope and a one-hour requested lifetime.
+Inherited Google CLI environment overrides are removed; the explicit configuration
+directory remains trusted operator input. Tokens stay in memory, with command
+diagnostics disabled and sanitized errors. They refresh before subsequent provider
+requests, without replaying failed publication writes. Expired login or denied
+IAM/Play access fails the operation and retains existing recovery gates.
+
+`doctor` checks local configuration readability only; it does not establish login
+or remote permissions. `provider-inspect` permits the exact IAM token-generation
+call in addition to the existing OAuth/read endpoints. It still cannot upload,
+allocate a version or submit a release. Store content/publication uses the same
+authentication and retains its separate source, artifact and approval policies.
+Synthetic adapter tests do not establish live IAM/Play access or installed-control
+adoption. A reviewed package pin and managed control upgrade remain necessary.
+
 ## Execution and storage
 
 Local operation is the default. Optional GitHub scheduling supports one designated self-hosted Mac and its existing shared filesystem, using a pinned workflow and permanent request claims. It does not select paid hosted runners or perform cross-machine failover. Consumer repositories for this executor must remain private; this public tool repository does not run release jobs. The [workflow example](examples/.github/workflows/release-local.yml) is inert until explicitly installed and configured in a consumer.
