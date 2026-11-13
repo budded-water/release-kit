@@ -15,7 +15,7 @@ async function fixture(t, base = tmpdir(), repoName = 'repo') {
   const directory = await mkdtemp(join(base, 'wechat-operation-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const repo = join(directory, repoName), store = join(directory, 'private');
-  await mkdir(repo);
+  await mkdir(repo); await mkdir(store);
   const git = (...args) => runCommand('git', args, { cwd: repo });
   await git('init', '-q');
   await git('config', 'user.name', 'Synthetic');
@@ -99,9 +99,48 @@ test('a checkout subdirectory cannot hide an in-checkout sibling store', async (
   const f = await fixture(t), nested = join(f.repo, 'src'), store = join(f.repo, 'missing-state');
   await mkdir(nested);
   const before = await readdir(f.repo);
-  await assert.rejects(createWechatRunner({ ...f.options, repo: nested, store }), /actual Git checkout root/);
+  const runner = await createWechatRunner({ ...f.options, repo: nested, store });
+  await assert.rejects(runner.prepare({ ref: 'HEAD', version: '1.22.5', current: observation }), /actual Git checkout root/);
   await assert.rejects(lstat(store), { code: 'ENOENT' });
   assert.deepEqual(await readdir(f.repo), before);
+});
+
+test('initial Git discovery retains bootstrap exclusion before any business journal exists', async (t) => {
+  for (const fenceFails of [false, true]) {
+    const f = await fixture(t), bootstrap = join(f.repo, '.git/release-kit-wechat');
+    let launched = 0;
+    const command = async (bin, args, options) => {
+      if (bin === 'git' && args.includes('--show-toplevel')) {
+        launched++;
+        if (fenceFails) await writeFile(join(bootstrap, 'locks'), 'synthetic fence failure');
+        throw Object.assign(new Error('Unsettled initial Git process'), { cleanupIncomplete: true });
+      }
+      return f.command(bin, args, options);
+    };
+    const runner = await createWechatRunner({ ...f.options, command });
+    await assert.rejects(runner.prepare({ ref: 'HEAD', version: '1.22.5', current: observation }), { cleanupIncomplete: true });
+    await lstat(join(bootstrap, 'initialization.lock'));
+    await assert.rejects(lstat(join(f.store, 'wechat')), { code: 'ENOENT' });
+    const fresh = await createWechatRunner({ ...f.options, command });
+    await assert.rejects(fresh.prepare({ ref: 'HEAD', version: '1.22.6', current: observation }), /Execution lock exists/);
+    assert.equal(launched, 1); assert.equal(f.calls.length, 0);
+  }
+});
+
+test('registered Git worktrees use protected administrative initialization state', async (t) => {
+  const f = await fixture(t), repo = join(dirname(f.repo), 'linked');
+  await runCommand('git', ['worktree', 'add', '-q', '--detach', repo, 'HEAD'], { cwd: f.repo });
+  await mkdir(join(repo, 'dist'));
+  await writeFile(join(repo, 'dist/project.config.json'), JSON.stringify({ appid: appId, compileType: 'miniprogram' }));
+  await writeFile(join(repo, 'dist/app.js'), 'App({})');
+  const project = { ...f.project, validate: async ({ source }) => {
+    await mkdir(join(repo, '.validation'), { recursive: true });
+    const bytes = JSON.stringify({ source }); await writeFile(join(repo, '.validation/receipt.json'), bytes);
+    return { path: '.validation/receipt.json', sha256: digest(bytes) };
+  } };
+  const runner = await createWechatRunner({ ...f.options, repo, store: join(dirname(repo), 'linked-private'), project });
+  assert.equal((await runner.prepare({ ref: 'HEAD', version: '1.22.5', current: observation })).status, 'prepared');
+  assert.equal(f.calls.length, 0);
 });
 
 test('origin credentials and query values never enter a prepared plan or CLI output', async (t) => {
@@ -158,12 +197,13 @@ test('expired observation blocks first write but never blocks observation of an 
 });
 
 test('unknown external write survives a fresh runner and never permits replay', async (t) => {
-  const f = await fixture(t), p = await f.prepare(); f.uploadMode('throw');
+  const f = await fixture(t), p = await f.prepare(), next = await f.prepare({ version: '1.22.6' }); f.uploadMode('throw');
   await assert.rejects(f.runner.upload(p.plan.id, digest(p.plan)), /outcome unknown/);
   const fresh = await createWechatRunner(f.options);
   assert.equal((await fresh.upload(p.plan.id, digest(p.plan))).status, 'upload-unknown');
   assert.equal((await fresh.resume(p.plan.id)).status, 'upload-unknown');
-  const next = await f.prepare({ version: '1.22.6' });
+  f.project.validate = () => { throw new Error('Must not rebuild active artifact'); };
+  await assert.rejects(f.prepare({ version: '1.22.7' }), /reconciliation before rebuilding/);
   await assert.rejects(fresh.upload(next.plan.id, digest(next.plan)), /reconciliation/);
   assert.equal(f.calls.filter((x) => x.tool === 'upload').length, 1);
 });
@@ -174,9 +214,17 @@ test('missing pending task identity stays unknown rather than authorizing anothe
   assert.equal((await f.runner.status(p.plan.id)).status, 'upload-unknown');
 });
 
+test('a valid journal copied under another operation identity cannot be observed or uploaded', async (t) => {
+  const f = await fixture(t), first = await f.prepare(), second = await f.prepare({ version: '1.22.6' });
+  await saveState(join(f.store, 'wechat/operations', first.plan.id), second);
+  await assert.rejects(f.runner.status(first.plan.id), /requested operation ID/);
+  await assert.rejects(f.runner.upload(first.plan.id, digest(second.plan)), /requested operation ID/);
+  assert.equal(f.calls.length, 0);
+});
+
 test('pending another version blocks new upload; completed versions retain immutable ownership', async (t) => {
-  const f = await fixture(t), p = await f.prepare(); await f.runner.upload(p.plan.id, digest(p.plan));
-  const next = await f.prepare({ version: '1.22.6' });
+  const f = await fixture(t), p = await f.prepare(), next = await f.prepare({ version: '1.22.6' }); await f.runner.upload(p.plan.id, digest(p.plan));
+  await assert.rejects(f.prepare({ version: '1.22.7' }), /reconciliation before rebuilding/);
   await assert.rejects(f.runner.upload(next.plan.id, digest(next.plan)), /reconciliation/);
   await f.runner.resume(p.plan.id);
   f.uploadMode('immediate'); await f.runner.upload(next.plan.id, digest(next.plan));
@@ -259,6 +307,56 @@ test('official success with changed local evidence is retained as uploaded-unver
   const observed = await f.runner.resume(p.plan.id);
   assert.equal(observed.status, 'uploaded-unverified');
   assert.equal(summarizeWechat(observed).uploadCompleted, true); assert.equal(summarizeWechat(observed).artifactVerified, false);
+});
+
+test('confirmed success is durable while post-validation is stalled and can resume without a provider call', async (t) => {
+  for (const mode of ['immediate', 'resume']) {
+    const f = await fixture(t), p = await f.prepare();
+    let validations = 0, entered, finish;
+    const active = new Promise((resolve) => entered = resolve), gate = new Promise((resolve) => finish = resolve);
+    const project = { ...f.project, revalidate: async () => { if (++validations === 2) { entered(); await gate; throw new Error('Synthetic settled verification failure'); } } };
+    const runner = await createWechatRunner({ ...f.options, project });
+    if (mode === 'immediate') f.uploadMode('immediate');
+    else await runner.upload(p.plan.id, digest(p.plan));
+    const running = mode === 'immediate' ? runner.upload(p.plan.id, digest(p.plan)) : runner.resume(p.plan.id);
+    await active;
+    const fresh = await createWechatRunner(f.options);
+    const saved = await fresh.status(p.plan.id);
+    assert.equal(saved.status, 'uploaded-unverified'); assert.equal(saved.observation.status, 'success');
+    try { await assert.rejects(fresh.resume(p.plan.id), /Execution lock exists/); }
+    finally { finish(); }
+    assert.equal((await running).status, 'uploaded-unverified');
+    const calls = f.calls.length;
+    assert.equal((await fresh.resume(p.plan.id)).status, 'uploaded');
+    assert.equal(f.calls.length, calls);
+  }
+});
+
+test('a real controller crash after confirmation retains success and requires owned-lock recovery', async (t) => {
+  const f = await fixture(t), p = await f.prepare();
+  const child = `
+    const [repo,store,projectJson,id,approval,time,moduleUrl,commandUrl] = process.argv.slice(1);
+    const {createWechatRunner} = await import(moduleUrl), {runCommand} = await import(commandUrl);
+    let validations=0;
+    const project={...JSON.parse(projectJson),validate:async()=>{},revalidate:async()=>{if(++validations===2)process.exit(77);}};
+    const command=async(bin,args,options)=>{
+      if(bin==='git')return runCommand(bin,args,options);
+      const result=args[2]==='upload'?{success:true,status:'success',result:{success:true}}:{success:true,skillVersion:'0.3.11',versionRelation:'equal',loginExpired:false,tokenRequired:false};
+      return {exitCode:0,stdout:JSON.stringify({ok:true,tool:args[2],clientName:'Codex',result})};
+    };
+    const runner=await createWechatRunner({repo,store,project,command,now:()=>Number(time)});
+    await runner.upload(id,approval);
+  `;
+  await assert.rejects(runCommand(process.execPath, ['--input-type=module', '-e', child, f.repo, f.store, JSON.stringify(f.project), p.plan.id, digest(p.plan), String(time), new URL('./wechat.mjs', import.meta.url).href, new URL('./command.mjs', import.meta.url).href]), (error) => error.exitCode === 77);
+  const fresh = await createWechatRunner(f.options);
+  assert.equal((await fresh.status(p.plan.id)).status, 'uploaded-unverified');
+  await assert.rejects(fresh.resume(p.plan.id), /Execution lock exists/);
+  // This synthetic controller has exited and its Git children were awaited;
+  // model explicit operator recovery of only its owned temporary locks.
+  await rm(join(f.repo, '.git/release-kit-wechat/initialization.lock'));
+  await rm(join(f.store, `wechat/target-${digest(appId)}.lock`));
+  assert.equal((await fresh.resume(p.plan.id)).status, 'uploaded');
+  assert.equal(f.calls.length, 0);
 });
 
 test('hook-originated post-success cleanup uncertainty retains the provider result and admission exclusion', async (t) => {

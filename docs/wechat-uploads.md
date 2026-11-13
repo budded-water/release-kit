@@ -61,9 +61,21 @@ macOS `/tmp` and `/var` aliases cannot hide an in-checkout store. Other symlink
 ancestors remain rejected before state writes.
 The store and repository must also be disjoint in the ancestor direction, so a
 store's managed `wechat/` or `locks/` namespace can never become the checkout.
-The selected repository must be Git's actual top-level checkout. A subdirectory
-is rejected before state writes, preventing sibling paths inside the real
-checkout from being misclassified as external state.
+Runner construction/status perform filesystem reads only. Before business-state
+writes, protected initialization verifies Git's actual top-level checkout; a
+subdirectory cannot hide sibling journals inside the real checkout.
+
+Initialization admission is separate from release history. A standard checkout
+uses `.git/release-kit-wechat/`; a registered worktree uses that worktree's Git
+administrative directory. These unversioned Git-metadata paths hold only
+initialization locks/cleanup fences, never plans, receipts or command output.
+Filesystem-only discovery locates them before the first child process. An
+initial-probe cleanup failure retains exclusion there even when its fence cannot
+be written. Business commands retain this admission plus the private store's
+target lock/shared fence. Root validation still precedes all business journals.
+The Git administration directory must be writable; separate-git-dir/submodule
+layouts are not supported by this first adapter. Do not move/prune Git metadata
+or clear either admission barrier until owned-process recovery is established.
 The AppID lock and immutable version ownership apply within that selected store;
 this is not machine-wide coordination across arbitrarily different stores.
 Existing designated-machine coordination remains necessary for shared targets.
@@ -76,6 +88,9 @@ are never automatically submitted again. Unknown results without a saved task
 require operator/provider reconciliation outside this first adapter. A new plan
 cannot bypass another active operation, and a different plan cannot reuse a
 claimed version. This first workflow offers no automatic retry/version reset.
+Prepare also rejects an active pending/unknown operation before invoking build
+hooks. Keep that operation's source and package frozen until it is reconciled;
+this guard coordinates the selected store and does not control unrelated builds.
 
 Admission also checks successful operation histories in the same store (including
 uploaded-unverified). A prepared older version cannot follow a newer upload, even
@@ -95,6 +110,10 @@ remain append-only; summaries are projections, not another mutable status ledger
 Post-success hooks must propagate `cleanupIncomplete` on unsettled children.
 Their error preserves the confirmed result as uploaded-unverified while blocking
 admission with both fence and retained lock, even if initial fence creation fails.
+Successful provider observations are first journaled as uploaded-unverified,
+before invoking post-validation, so a stalled/crashed hook cannot erase success.
+After process recovery, explicit resume of that state reruns verification only;
+it makes no upload or provider query. Ordinary upload calls never replay it.
 
 ## Verification plan
 
