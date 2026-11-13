@@ -56,6 +56,8 @@ outside the candidate checkout. Keep the same store for the same consumer/AppID.
 Containment resolves existing ancestors while preserving nonexistent suffixes;
 macOS `/tmp` and `/var` aliases cannot hide an in-checkout store. Other symlink
 ancestors remain rejected before state writes.
+The store and repository must also be disjoint in the ancestor direction, so a
+store's managed `wechat/` or `locks/` namespace can never become the checkout.
 The AppID lock and immutable version ownership apply within that selected store;
 this is not machine-wide coordination across arbitrarily different stores.
 Existing designated-machine coordination remains necessary for shared targets.

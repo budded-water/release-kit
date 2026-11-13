@@ -151,7 +151,7 @@ export async function createWechatRunner({ repo, store, project, command = runCo
   const root = await realpath(repo);
   if (!isAbsolute(store)) throw new Error('WeChat state must be an absolute private directory outside candidate source');
   store = await canonicalPrivatePath(store);
-  if (store === root || inside(root, store)) throw new Error('WeChat state must be an absolute private directory outside candidate source');
+  if (store === root || inside(root, store) || inside(store, root)) throw new Error('WeChat state must be an absolute private directory outside candidate source without ancestor overlap');
   const directory = join(store, 'wechat');
   await privateDirectory(directory);
   const cleanup = createCleanupGuard(store, command);

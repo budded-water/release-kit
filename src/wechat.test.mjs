@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, lstat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, lstat, readdir } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runCommand } from './command.mjs';
 import { digest, loadState, saveState } from './state.mjs';
@@ -11,10 +11,10 @@ import { main } from './cli.mjs';
 const appId = 'wx1111111111111111';
 const time = Date.parse('2026-01-02T12:00:00Z');
 const observation = { appId, version: '1.22.4', source: 'owner', observedAt: new Date(time).toISOString() };
-async function fixture(t, base = tmpdir()) {
+async function fixture(t, base = tmpdir(), repoName = 'repo') {
   const directory = await mkdtemp(join(base, 'wechat-operation-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const repo = join(directory, 'repo'), store = join(directory, 'private');
+  const repo = join(directory, repoName), store = join(directory, 'private');
   await mkdir(repo);
   const git = (...args) => runCommand('git', args, { cwd: repo });
   await git('init', '-q');
@@ -83,6 +83,15 @@ test('state remains outside source through system aliases and nonexistent nested
       await assert.rejects(createWechatRunner({ ...f.options, store }), /outside candidate source/);
       if (suffix) await assert.rejects(lstat(store), { code: 'ENOENT' });
     }
+  }
+});
+
+test('ancestor stores cannot put managed journals or cleanup locks inside a checkout', async (t) => {
+  for (const name of ['wechat', 'locks']) {
+    const f = await fixture(t, tmpdir(), name), parent = dirname(f.repo);
+    const before = await readdir(parent);
+    await assert.rejects(createWechatRunner({ ...f.options, store: parent }), /ancestor overlap/);
+    assert.deepEqual(await readdir(parent), before);
   }
 });
 
