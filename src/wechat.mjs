@@ -114,6 +114,7 @@ export function assertWechatState(state) {
       !/^wx[a-f0-9]{16}$/.test(state.plan.appId) || !versionPattern.test(state.plan.version) ||
       state.plan.operation !== 'developer-upload' || !hash.test(state.plan.artifact?.digest ?? '') ||
       !hash.test(state.plan.validation?.sha256 ?? '')) throw new Error('Invalid WeChat operation state');
+  repositoryIdentity(state.plan.repository);
   const { id, ...identity } = state.plan;
   if (id !== `wechat-${digest(identity).slice(0, 24)}`) throw new Error('WeChat plan identity changed');
   if (state.taskId !== undefined && !validTask(state.taskId)) throw new Error('Invalid task identity');
@@ -214,6 +215,20 @@ export async function createWechatRunner({ repo, store, project, command = runCo
     await receipt(plan.validation);
     if (digest(await inspectWechatArtifact(root, project.artifactDirectory, project.appId)) !== digest(plan.artifact)) throw new Error('Prepared artifact changed');
   };
+  const verifyObservedUpload = async (state) => {
+    if (state.status !== 'uploaded') return state;
+    try { await revalidate(state.plan); }
+    catch (error) {
+      state.status = 'uploaded-unverified';
+      if (error?.cleanupIncomplete === true) {
+        // Fence first, but retain the confirmed provider result even if creating
+        // that fence fails. capture marks blocked before attempting any write.
+        try { await cleanup.capture(error); }
+        finally { await save(state); await cleanup.assertSafe(); }
+      }
+    }
+    return state;
+  };
 
   return {
     async prepare({ ref, version, current, description = '' }) {
@@ -280,11 +295,10 @@ export async function createWechatRunner({ repo, store, project, command = runCo
         try {
           const result = await official('upload', ['--project', resolve(root, project.artifactDirectory), '--upload-version', state.plan.version, '--desc', state.plan.description]);
           state = { ...state, ...result, updatedAt: new Date(now()).toISOString() };
-          if (state.status === 'uploaded') {
-            try { await revalidate(state.plan); } catch { state.status = 'uploaded-unverified'; }
-          }
+          state = await verifyObservedUpload(state);
           await save(state);
-        } catch {
+        } catch (error) {
+          if (error?.cleanupIncomplete === true) throw error;
           // Never log raw command output, credentials or an unbound failure message.
           throw new Error(`Upload outcome unknown; inspect operation ${id} before any new upload`);
         }
@@ -297,10 +311,7 @@ export async function createWechatRunner({ repo, store, project, command = runCo
         if (state.status !== 'pending-confirmation') return state;
         // One explicit observation only; no background polling or upload retries.
         const result = await official('polling_task_result', ['--task-id', state.taskId], state.taskId);
-        const next = { ...state, ...result, updatedAt: new Date(now()).toISOString() };
-        if (next.status === 'uploaded') {
-          try { await revalidate(next.plan); } catch { next.status = 'uploaded-unverified'; }
-        }
+        const next = await verifyObservedUpload({ ...state, ...result, updatedAt: new Date(now()).toISOString() });
         await save(next);
         return next;
       });

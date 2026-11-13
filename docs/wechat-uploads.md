@@ -92,6 +92,9 @@ revalidated is `uploaded-unverified`: the upload happened, while artifact identi
 is unaccepted. The distinction survives in the derived summary. A contradictory
 current observation/state or an unknown prose field is rejected. Original events
 remain append-only; summaries are projections, not another mutable status ledger.
+Post-success hooks must propagate `cleanupIncomplete` on unsettled children.
+Their error preserves the confirmed result as uploaded-unverified while blocking
+admission with both fence and retained lock, even if initial fence creation fails.
 
 ## Verification plan
 

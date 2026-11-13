@@ -261,6 +261,31 @@ test('official success with changed local evidence is retained as uploaded-unver
   assert.equal(summarizeWechat(observed).uploadCompleted, true); assert.equal(summarizeWechat(observed).artifactVerified, false);
 });
 
+test('hook-originated post-success cleanup uncertainty retains the provider result and admission exclusion', async (t) => {
+  for (const mode of ['immediate', 'resume']) for (const fenceFails of [false, true]) {
+    const f = await fixture(t), p = await f.prepare();
+    let validations = 0;
+    const project = { ...f.project, revalidate: async () => {
+      if (++validations === 2) {
+        if (fenceFails) await writeFile(join(f.store, 'locks'), 'synthetic fence creation failure');
+        throw Object.assign(new Error('Synthetic unsettled validation child'), { cleanupIncomplete: true });
+      }
+    } };
+    const runner = await createWechatRunner({ ...f.options, project });
+    if (mode === 'immediate') f.uploadMode('immediate');
+    if (mode === 'resume') await runner.upload(p.plan.id, digest(p.plan));
+    await assert.rejects(mode === 'resume' ? runner.resume(p.plan.id) : runner.upload(p.plan.id, digest(p.plan)), { cleanupIncomplete: true });
+    const saved = await runner.status(p.plan.id);
+    assert.equal(saved.status, 'uploaded-unverified'); assert.equal(saved.observation.status, 'success');
+    assert.equal(summarizeWechat(saved).uploadCompleted, true);
+    if (fenceFails) await assert.rejects(lstat(join(f.store, 'locks/cleanup-incomplete.lock')), { code: 'ENOTDIR' });
+    else await lstat(join(f.store, 'locks/cleanup-incomplete.lock'));
+    const fresh = await createWechatRunner(f.options);
+    await assert.rejects(fresh.resume(p.plan.id), /Execution lock exists/);
+    assert.equal(f.calls.filter((call) => call.tool === 'upload').length, 1);
+  }
+});
+
 test('redirected artifacts and contradictory current state are rejected', async (t) => {
   const f = await fixture(t), p = await f.prepare();
   await symlink(join(f.repo, 'source.txt'), join(f.repo, 'dist/redirect.js'));
@@ -268,6 +293,9 @@ test('redirected artifacts and contradictory current state are rejected', async 
   for (const patch of [{ status: 'uploaded' }, { status: 'pending-confirmation' }, { publication: 'no upload occurred' }]) {
     assert.throws(() => assertWechatState({ ...p, ...patch }));
   }
+  const { id: _id, ...identity } = p.plan;
+  const unsafe = { ...identity, repository: 'https://SYNTHETIC_SECRET@example.invalid/repo.git' };
+  assert.throws(() => assertWechatState({ ...p, plan: { id: `wechat-${digest(unsafe).slice(0, 24)}`, ...unsafe } }), /credential-free/);
   const bad = { ...p, status: 'uploaded' };
   await saveState(join(f.store, 'wechat/operations', p.plan.id), bad);
   await assert.rejects(f.runner.status(p.plan.id), /observation/);
