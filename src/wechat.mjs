@@ -18,6 +18,16 @@ function compareVersions(a, b) {
 const strictKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) &&
   Object.keys(value).every((key) => keys.includes(key));
 const bytesHash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+function repositoryIdentity(origin) {
+  const invalid = () => new Error('Remote origin must use a credential-free Git URL without query or fragment values');
+  if (typeof origin !== 'string' || origin.length > 2048 || /\s/.test(origin)) throw invalid();
+  if (/^git@[A-Za-z0-9.-]+:[A-Za-z0-9._~/-]+$/.test(origin)) return origin;
+  let url;
+  try { url = new URL(origin); } catch { throw invalid(); }
+  if (!['http:', 'https:', 'ssh:', 'git:'].includes(url.protocol) || !url.hostname || url.password || url.search || url.hash ||
+      url.username && !(url.protocol === 'ssh:' && url.username === 'git')) throw invalid();
+  return origin;
+}
 const inside = (root, path) => {
   const tail = relative(root, path);
   return tail && tail !== '..' && !tail.startsWith(`..${sep}`) && !isAbsolute(tail);
@@ -149,6 +159,9 @@ function decode(output, tool, clientName, taskId) {
 export async function createWechatRunner({ repo, store, project, command = runCommand, signal, now = Date.now }) {
   project = requireProject(project);
   const root = await realpath(repo);
+  const checkout = await command('git', ['rev-parse', '--show-toplevel'], { cwd: root, timeout: 30000, signal, diagnostics: false });
+  if (checkout.exitCode !== 0 || typeof checkout.stdout !== 'string' || checkout.stdout.length > 16384 ||
+      !isAbsolute(checkout.stdout.trim()) || await realpath(checkout.stdout.trim()) !== root) throw new Error('WeChat repo must be the actual Git checkout root');
   if (!isAbsolute(store)) throw new Error('WeChat state must be an absolute private directory outside candidate source');
   store = await canonicalPrivatePath(store);
   if (store === root || inside(root, store) || inside(store, root)) throw new Error('WeChat state must be an absolute private directory outside candidate source without ancestor overlap');
@@ -211,11 +224,12 @@ export async function createWechatRunner({ repo, store, project, command = runCo
         const commit = await git('rev-parse', '--verify', `${ref}^{commit}`);
         if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('Invalid source commit');
         await source(commit);
+        const repository = repositoryIdentity(await git('remote', 'get-url', 'origin'));
         const validation = await project.validate({ root, source: commit, command, signal });
         await receipt(validation);
         const artifact = await inspectWechatArtifact(root, project.artifactDirectory, project.appId);
         await source(commit);
-        const identity = { source: commit, repository: await git('remote', 'get-url', 'origin'), appId: project.appId, version,
+        const identity = { source: commit, repository, appId: project.appId, version,
           current, artifact, validation, policy: project.policy, driver: project.driver, description, operation: 'developer-upload' };
         const plan = { id: `wechat-${digest(identity).slice(0, 24)}`, ...identity };
         if (await loadState(statePath(plan.id))) return read(plan.id);

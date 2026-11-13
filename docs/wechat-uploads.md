@@ -14,7 +14,7 @@ false in its derived summary. Official confirmation and MFA remain interactive.
 
 ## Trusted project and evidence
 
-The selected module exports `{ repo, wechatProject }`. Its project has
+The selected module's default export is `{ repo, wechatProject }`. Its project has
 `schemaVersion: 1`, `appId`, `artifactDirectory` relative to the checkout,
 `policy`, `driver: { binary, clientName, skillVersion }`, and asynchronous
 `validate`/`revalidate` hooks. Driver selection is trusted operator configuration;
@@ -44,6 +44,9 @@ observation; its declared source is not independent provider attestation.
 
 The plan binds source/repository, AppID, current-version observation, proposed
 version, artifact/validation digests, trusted policy, driver and description.
+Origins use credential-free HTTP(S), Git, SSH or `git@host:path` URLs. Embedded
+credentials, queries/fragments and unsupported local/opaque origins are rejected
+before their values can enter a saved plan or CLI projection.
 `upload` requires its exact SHA256 approval digest. The CLI cannot grant owner or
 platform authorization: pass that approval only after the actual task authorizes
 the concrete developer upload. Preparing and observing do not authorize it.
@@ -58,6 +61,9 @@ macOS `/tmp` and `/var` aliases cannot hide an in-checkout store. Other symlink
 ancestors remain rejected before state writes.
 The store and repository must also be disjoint in the ancestor direction, so a
 store's managed `wechat/` or `locks/` namespace can never become the checkout.
+The selected repository must be Git's actual top-level checkout. A subdirectory
+is rejected before state writes, preventing sibling paths inside the real
+checkout from being misclassified as external state.
 The AppID lock and immutable version ownership apply within that selected store;
 this is not machine-wide coordination across arbitrarily different stores.
 Existing designated-machine coordination remains necessary for shared targets.

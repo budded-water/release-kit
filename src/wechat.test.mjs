@@ -95,6 +95,32 @@ test('ancestor stores cannot put managed journals or cleanup locks inside a chec
   }
 });
 
+test('a checkout subdirectory cannot hide an in-checkout sibling store', async (t) => {
+  const f = await fixture(t), nested = join(f.repo, 'src'), store = join(f.repo, 'missing-state');
+  await mkdir(nested);
+  const before = await readdir(f.repo);
+  await assert.rejects(createWechatRunner({ ...f.options, repo: nested, store }), /actual Git checkout root/);
+  await assert.rejects(lstat(store), { code: 'ENOENT' });
+  assert.deepEqual(await readdir(f.repo), before);
+});
+
+test('origin credentials and query values never enter a prepared plan or CLI output', async (t) => {
+  const f = await fixture(t);
+  for (const origin of ['https://SYNTHETIC_SECRET@example.invalid/repo.git', 'https://example.invalid/repo.git?token=SYNTHETIC_SECRET', 'ssh://git:SYNTHETIC_SECRET@example.invalid/repo.git']) {
+    await runCommand('git', ['remote', 'set-url', 'origin', origin], { cwd: f.repo });
+    await assert.rejects(f.prepare(), (error) => /credential-free/.test(error.message) && !error.message.includes('SYNTHETIC_SECRET'));
+  }
+  await assert.rejects(lstat(join(f.store, 'wechat/operations')), { code: 'ENOENT' });
+  assert.equal(f.calls.length, 0);
+  const current = join(f.store, 'current.json');
+  await writeFile(current, JSON.stringify({ ...observation, observedAt: new Date().toISOString() }));
+  let printed = false;
+  await assert.rejects(main({ repo: f.repo, wechatProject: f.project, command: f.command, output: () => { printed = true; }, args: ['wechat', 'prepare', '--ref', 'HEAD', '--version', '1.22.5', '--current', current, '--state-dir', f.store] }), /credential-free/);
+  assert.equal(printed, false);
+  await runCommand('git', ['remote', 'set-url', 'origin', 'git@example.invalid:synthetic/repo.git'], { cwd: f.repo });
+  assert.equal((await f.prepare()).plan.repository, 'git@example.invalid:synthetic/repo.git');
+});
+
 test('prepare is non-publishing; exact approval, pending resume and final upload have truthful projections', async (t) => {
   const f = await fixture(t), prepared = await f.prepare();
   assert.equal(prepared.status, 'prepared'); assert.equal(f.calls.length, 0);
