@@ -135,7 +135,7 @@ test('pending another version blocks new upload; completed versions retain immut
   await f.runner.resume(p.plan.id);
   f.uploadMode('immediate'); await f.runner.upload(next.plan.id, digest(next.plan));
   const duplicate = await f.prepare({ description: 'another plan for the same version' });
-  await assert.rejects(f.runner.upload(duplicate.plan.id, digest(duplicate.plan)), /already bound/);
+  await assert.rejects(f.runner.upload(duplicate.plan.id, digest(duplicate.plan)), /newer than all uploaded/);
   assert.equal(f.calls.filter((x) => x.tool === 'upload').length, 2);
 });
 
@@ -144,6 +144,27 @@ test('cancelled task is terminal; resume and upload do not silently retry', asyn
   const cancelled = await f.runner.resume(p.plan.id); assert.equal(cancelled.status, 'cancelled');
   await f.runner.resume(p.plan.id); await f.runner.upload(p.plan.id, digest(p.plan));
   assert.equal(f.calls.filter((x) => x.tool === 'upload').length, 1);
+  const replacement = await f.prepare({ description: 'different plan, same cancelled version' });
+  await assert.rejects(f.runner.upload(replacement.plan.id, digest(replacement.plan)), /already has an operation|already bound/);
+});
+
+test('successful version authority survives descending plans, later failure and a fresh runner', async (t) => {
+  for (const unverified of [false, true]) await t.test(String(unverified), async (t) => {
+    const f = await fixture(t), older = await f.prepare(), newer = await f.prepare({ version: '1.22.6' });
+    await f.runner.upload(newer.plan.id, digest(newer.plan));
+    if (unverified) f.invalidate();
+    assert.equal((await f.runner.resume(newer.plan.id)).status, unverified ? 'uploaded-unverified' : 'uploaded');
+    // A subsequent cancelled operation must not replace the successful version floor.
+    if (!unverified) {
+      const later = await f.prepare({ version: '1.22.7' });
+      await f.runner.upload(later.plan.id, digest(later.plan)); f.taskMode('cancelled'); await f.runner.resume(later.plan.id);
+    }
+    // Restore the trusted hook to isolate version admission from receipt rejection.
+    const fresh = await createWechatRunner({ ...f.options, project: { ...f.project, revalidate: async () => {} } });
+    const before = f.calls.filter((x) => x.tool === 'upload').length;
+    await assert.rejects(fresh.upload(older.plan.id, digest(older.plan)), /newer than all uploaded/);
+    assert.equal(f.calls.filter((x) => x.tool === 'upload').length, before);
+  });
 });
 
 test('two runners cannot concurrently write the same AppID within one selected state store', async (t) => {
@@ -210,8 +231,37 @@ test('cleanup uncertainty uses the shared durable fence across runner instances'
   const f = await fixture(t), p = await f.prepare(); f.uploadMode('cleanup');
   await assert.rejects(f.runner.upload(p.plan.id, digest(p.plan)), /cleanup|unconfirmed/i);
   const fresh = await createWechatRunner(f.options);
-  await assert.rejects(fresh.resume(p.plan.id), /cleanup|unconfirmed/i);
+  await assert.rejects(fresh.resume(p.plan.id), /cleanup|unconfirmed|Execution lock exists/i);
   assert.equal(f.calls.filter((x) => x.tool === 'upload').length, 1);
+});
+
+test('target exclusion survives cleanup uncertainty even when the initial fence cannot be created', async (t) => {
+  const f = await fixture(t), p = await f.prepare();
+  const child = `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const [repo,store,projectJson,id,approval,time,moduleUrl,commandUrl] = process.argv.slice(1);
+    const originalOpen = fs.promises.open;
+    fs.promises.open = async (...args) => {
+      if (String(args[0]).endsWith('cleanup-incomplete.lock') && args[1] === 'wx') throw Object.assign(new Error('Synthetic full disk'),{code:'ENOSPC'});
+      return originalOpen(...args);
+    };
+    syncBuiltinESMExports();
+    const {createWechatRunner} = await import(moduleUrl), {runCommand} = await import(commandUrl);
+    const project = {...JSON.parse(projectJson),validate:async()=>{},revalidate:async()=>{}};
+    const command = async (bin,args,options) => {
+      if(bin==='git') return runCommand(bin,args,options);
+      if(args[2]==='upload') throw Object.assign(new Error('Unsettled process'),{cleanupIncomplete:true});
+      return {exitCode:0,stdout:JSON.stringify({ok:true,tool:args[2],clientName:'Codex',result:{success:true,skillVersion:'0.3.11',versionRelation:'equal',loginExpired:false,tokenRequired:false}})};
+    };
+    const runner = await createWechatRunner({repo,store,project,command,now:()=>Number(time)});
+    try { await runner.upload(id,approval); throw new Error('unexpected success'); }
+    catch(error) { if(!error.cleanupIncomplete) throw error; }
+  `;
+  await runCommand(process.execPath, ['--input-type=module', '-e', child, f.repo, f.store, JSON.stringify(f.project), p.plan.id, digest(p.plan), String(time), new URL('./wechat.mjs', import.meta.url).href, new URL('./command.mjs', import.meta.url).href]);
+  await assert.rejects(readFile(join(f.store, 'locks/cleanup-incomplete.lock')), { code: 'ENOENT' });
+  const fresh = await createWechatRunner(f.options);
+  await assert.rejects(fresh.resume(p.plan.id), /Execution lock exists/);
 });
 
 test('CLI never conflates prepare/status observation with pending upload completion', async (t) => {

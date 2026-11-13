@@ -11,6 +11,10 @@ const idPattern = /^wechat-[a-f0-9]{24}$/;
 const taskPattern = /^[A-Za-z0-9_-]{1,200}$/;
 const validTask = (value) => typeof value === 'string' && taskPattern.test(value);
 const versionPattern = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
+function compareVersions(a, b) {
+  const left = a.split('.').map(BigInt), right = b.split('.').map(BigInt);
+  return left.map((n, i) => n > right[i] ? 1 : n < right[i] ? -1 : 0).find((n) => n !== 0) ?? 0;
+}
 const strictKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) &&
   Object.keys(value).every((key) => keys.includes(key));
 const bytesHash = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -31,9 +35,7 @@ export function assertWechatVersionObservation(value, appId, version, now = Date
   if (!Number.isFinite(time) || time > now || now - time > 24 * 60 * 60 * 1000) {
     throw new Error('Current-version observation must be from the last 24 hours');
   }
-  const proposed = version.split('.').map(BigInt), current = value.version.split('.').map(BigInt);
-  const order = proposed.map((n, i) => n > current[i] ? 1 : n < current[i] ? -1 : 0).find((n) => n !== 0) ?? 0;
-  if (order <= 0) throw new Error('A new upload version must be newer than the observed version');
+  if (compareVersions(version, value.version) <= 0) throw new Error('A new upload version must be newer than the observed version');
 }
 
 async function boundedFile(root, path, limit) {
@@ -170,7 +172,7 @@ export async function createWechatRunner({ repo, store, project, command = runCo
   };
   const locked = async (fn) => {
     const release = await acquireLock(join(directory, `target-${digest(project.appId)}.lock`));
-    try { signal?.throwIfAborted(); return await cleanup.run(fn); } finally { await release(); }
+    try { signal?.throwIfAborted(); return await cleanup.run(fn); } finally { if (!cleanup.blocked) await release(); }
   };
   const git = async (...args) => {
     const result = await command('git', args, { cwd: root, signal, diagnostics: false });
@@ -236,6 +238,17 @@ export async function createWechatRunner({ repo, store, project, command = runCo
           const other = await read(active.id);
           if (['prepared', 'upload-unknown', 'pending-confirmation'].includes(other.status)) throw new Error('Another operation for this AppID needs reconciliation first');
           if (other.plan.version === state.plan.version) throw new Error('This version already has an operation; inspect its original journal');
+        }
+        // Persisted successful operations remain authority even after a later failure
+        // changes the active pointer. Read the append-only histories under this lock.
+        const operations = await readdir(join(directory, 'operations'), { withFileTypes: true });
+        if (operations.length > 10000) throw new Error('Operation history exceeds inspection budget');
+        for (const entry of operations) {
+          if (!entry.isDirectory() || !idPattern.test(entry.name)) throw new Error('Invalid operation history entry');
+          const previous = await loadState(statePath(entry.name));
+          assertWechatState(previous);
+          if (previous.plan.appId === project.appId && ['uploaded', 'uploaded-unverified'].includes(previous.status) &&
+              compareVersions(state.plan.version, previous.plan.version) <= 0) throw new Error('A new upload version must be newer than all uploaded versions in this store');
         }
         const versionPath = join(directory, `version-${digest([project.appId, state.plan.version])}.json`);
         let owner;

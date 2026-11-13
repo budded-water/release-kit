@@ -66,6 +66,12 @@ require operator/provider reconciliation outside this first adapter. A new plan
 cannot bypass another active operation, and a different plan cannot reuse a
 claimed version. This first workflow offers no automatic retry/version reset.
 
+Admission also checks successful operation histories in the same store (including
+uploaded-unverified). A prepared older version cannot follow a newer upload, even
+if a later cancelled/failed operation replaced the active pointer. History scans
+are bounded to 10,000 operation entries. Cleanup uncertainty preserves the target
+lock as well as the shared fence, including failure to create the initial fence.
+
 The selected trusted adapter must still match the saved policy and driver before
 resuming. Policy/installation changes require deliberate compatibility review;
 do not retarget a historical journal to different code or a new private store.
