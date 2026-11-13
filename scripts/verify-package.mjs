@@ -52,6 +52,8 @@ try {
     import { saveState, releasePath } from '@budded-water/release-kit/state';
     import { createRunner } from '@budded-water/release-kit/engine';
     import { workerMain } from '@budded-water/release-kit/worker';
+    import { assertWechatVersionObservation } from '@budded-water/release-kit/wechat';
+    assert.doesNotThrow(() => assertWechatVersionObservation({appId:'wx1111111111111111',version:'1.0.0',source:'owner',observedAt:new Date().toISOString()},'wx1111111111111111','1.0.1'));
     const id = 'release-' + 'a'.repeat(24);
     const store = fileURLToPath(new URL('./state', import.meta.url));
     await saveState(releasePath(store, id), { plan: { id, source: 'a'.repeat(40), platforms: ['ios'] }, stages: {}, outcomes: {} });

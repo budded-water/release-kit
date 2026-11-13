@@ -23,6 +23,7 @@
     "src/*.mjs",
     "!src/*.test.mjs",
     "bin",
+    "docs/wechat-uploads.md",
     "README.md",
     "SECURITY.md"
   ],
