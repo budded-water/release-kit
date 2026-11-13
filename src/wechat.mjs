@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { acquireLock, atomicJson, digest, loadState, privateDirectory, readJson, saveState } from './state.mjs';
+import { acquireLock, atomicJson, canonicalPrivatePath, digest, loadState, privateDirectory, readJson, saveState } from './state.mjs';
 import { runCommand } from './command.mjs';
 import { createCleanupGuard } from './cleanup.mjs';
 
@@ -149,7 +149,9 @@ function decode(output, tool, clientName, taskId) {
 export async function createWechatRunner({ repo, store, project, command = runCommand, signal, now = Date.now }) {
   project = requireProject(project);
   const root = await realpath(repo);
-  if (!isAbsolute(store) || resolve(store) === root || inside(root, resolve(store))) throw new Error('WeChat state must be an absolute private directory outside candidate source');
+  if (!isAbsolute(store)) throw new Error('WeChat state must be an absolute private directory outside candidate source');
+  store = await canonicalPrivatePath(store);
+  if (store === root || inside(root, store)) throw new Error('WeChat state must be an absolute private directory outside candidate source');
   const directory = join(store, 'wechat');
   await privateDirectory(directory);
   const cleanup = createCleanupGuard(store, command);

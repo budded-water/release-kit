@@ -53,6 +53,9 @@ the concrete developer upload. Preparing and observing do not authorize it.
 Existing private atomic-journal, locking and cleanup-fence helpers are reused in
 a separate `wechat/` namespace. A state store must be explicit, absolute and
 outside the candidate checkout. Keep the same store for the same consumer/AppID.
+Containment resolves existing ancestors while preserving nonexistent suffixes;
+macOS `/tmp` and `/var` aliases cannot hide an in-checkout store. Other symlink
+ancestors remain rejected before state writes.
 The AppID lock and immutable version ownership apply within that selected store;
 this is not machine-wide coordination across arbitrarily different stores.
 Existing designated-machine coordination remains necessary for shared targets.

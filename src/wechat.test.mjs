@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runCommand } from './command.mjs';
@@ -11,8 +11,8 @@ import { main } from './cli.mjs';
 const appId = 'wx1111111111111111';
 const time = Date.parse('2026-01-02T12:00:00Z');
 const observation = { appId, version: '1.22.4', source: 'owner', observedAt: new Date(time).toISOString() };
-async function fixture(t) {
-  const directory = await mkdtemp(join(tmpdir(), 'wechat-operation-'));
+async function fixture(t, base = tmpdir()) {
+  const directory = await mkdtemp(join(base, 'wechat-operation-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const repo = join(directory, 'repo'), store = join(directory, 'private');
   await mkdir(repo);
@@ -73,6 +73,17 @@ test('explicit current version rejects historical logs, stale/unknown versions a
     assert.throws(() => assertWechatVersionObservation(current, appId, '1.22.5', time));
   }
   for (const version of ['1.22.0', '1.22.4', '1.22.4-test', '01.22.5']) assert.throws(() => assertWechatVersionObservation(observation, appId, version, time));
+});
+
+test('state remains outside source through system aliases and nonexistent nested directories', async (t) => {
+  for (const base of process.platform === 'darwin' ? [tmpdir(), '/tmp'] : [tmpdir()]) {
+    const f = await fixture(t, base);
+    for (const suffix of ['', '.private-state', 'missing/nested-state']) {
+      const store = join(f.repo, suffix);
+      await assert.rejects(createWechatRunner({ ...f.options, store }), /outside candidate source/);
+      if (suffix) await assert.rejects(lstat(store), { code: 'ENOENT' });
+    }
+  }
 });
 
 test('prepare is non-publishing; exact approval, pending resume and final upload have truthful projections', async (t) => {
