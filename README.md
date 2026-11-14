@@ -218,3 +218,88 @@ pnpm run verify:package
 The package check uses `pnpm pack` and installs the resulting tarball into separate synthetic pnpm and npm consumers, verifying imports and the executable in each. `pnpm-lock.yaml` is the only repository dependency lockfile. pnpm uses a shared content-addressable store to reuse dependency files across projects; this package currently has no dependencies to deduplicate.
 
 Tests cover bounded subprocess cleanup, private state, provider failures, store-content planning, request ownership, retirement, polling, summaries, complete synthetic run/resume flows, cleanup admission fences, UI evidence regeneration and two synthetic project adapters. Synthetic adapters demonstrate isolation and recovery; they are not a second real consumer, native UI acceptance or store readiness. Real consumer regression and packaging acceptance must be recorded against exact commits separately. A GitHub response of unknown remains unverified even when local recovery succeeds.
+
+## Operator store observations and handoff
+
+For a store step completed through an authorized console, record its observed
+result against an existing release and exact artifact. These commands run locally,
+require no provider configuration, and make no network or publication requests.
+
+```sh
+release-kit --project /absolute/trusted/project.mjs store-record release-<id> \
+  --state-dir /absolute/private/state --receipt /absolute/private/receipt.json
+release-kit --project /absolute/trusted/project.mjs store-handoff release-<id> \
+  --state-dir /absolute/private/state
+```
+
+A receipt uses the following shape. Replace the synthetic identifiers with the
+existing release's identities and provide real, locally retained evidence.
+All five facts are explicit snapshots. Use `unknown` for anything not observed.
+`source` is the recorded source commit, `appId` is the artifact's application
+identity, and `draftId` identifies the specific remote version/draft.
+
+```json
+{
+  "schemaVersion": 1,
+  "releaseId": "release-aaaaaaaaaaaaaaaaaaaaaaaa",
+  "source": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "platform": "harmony",
+  "store": "example-store",
+  "appId": "example.app",
+  "draftId": "draft-1",
+  "artifactSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "observedAt": "2026-01-01T00:00:00Z",
+  "facts": {
+    "package": "uploaded",
+    "draft": "saved",
+    "submission": "blocked",
+    "review": "unknown",
+    "publication": "unknown"
+  },
+  "privacy": {
+    "listingAppName": "Example",
+    "policyAppName": "Old Example",
+    "policyId": "policy-2",
+    "linkedPolicyId": "policy-1",
+    "reviewState": "approved"
+  },
+  "evidence": [{ "path": "proof.png", "kind": "screenshot" }],
+  "nextAction": "Correct the policy application name and link the approved policy"
+}
+```
+
+Allowed facts are `package` (`unknown`, `uploaded`), `draft` (`unknown`, `saved`),
+`submission` (`unknown`, `blocked`, `submitted`), `review` (`unknown`, `in_review`,
+`approved`, `rejected`) and `publication` (`unknown`, `published`). Each fact
+requires its own observed evidence. A published observation never synthesizes
+submission or review facts. Evidence kinds are `screenshot`, `document`, and
+`provider-response`. Keep passwords, tokens, government IDs, signed URLs and
+unredacted sensitive screenshots out of receipts and evidence. Evidence paths
+resolve relative to the receipt and are stored as private local references with
+hashes. Files must remain available for later verification.
+
+The optional `privacy` snapshot checks the exact application names, protocol
+review state and linked protocol ID. `policyAppName` means the application name
+inside the policy, rather than the policy title. Use `linkedPolicyId: null` when
+no protocol is associated. Review states are `unknown`, `draft`, `in_review`,
+`approved`, and `rejected`. Missing or unequal names, unapproved review and missing
+association remain explicit blockers. A matching snapshot only establishes these
+observed fields. Provider validation and the actual application's data behavior
+remain separate evidence.
+
+Compatibility uses an additive optional `operatorStoreRecords` field in schema-v1
+journal snapshots. Existing histories remain readable without migration. Writes
+use the engine's release lock, validate release/source/artifact identity and append
+the normal integrity-chained event. Identical receipt retries reuse their prior
+record. Existing build, acceptance, publication and outcome fields retain their
+values. Operator records never authorize publication, recovery or a retry.
+Legacy artifacts outside the journal need their original release identity
+reconciled separately; this command does not import or relabel them.
+
+`store-handoff` emits a JSON handoff from the latest observed timestamp for each
+platform/store/application/draft. Ties use the later recorded observation. It
+includes provenance, original facts, privacy blockers, evidence hashes, current
+file integrity, current artifact matching and the operator's next action. Missing
+or changed evidence stays visible. The output is historical and does not query a
+provider. Generate it again at handoff time instead of maintaining a second status
+ledger manually. Snapshot files for different times should be retained separately.
