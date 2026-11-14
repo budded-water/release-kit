@@ -291,7 +291,7 @@ async function platformHandoffs(state) {
         ]),
         receipt: acceptanceReference(receipt),
         superseded: (state.acceptanceHistory ?? [])
-          .filter((entry) => entry.platform === platform)
+          .filter((entry) => entry.platform === platform && entry.receipt)
           .slice(-1)
           .map((entry) => ({
             status: entry.state ?? 'unknown',

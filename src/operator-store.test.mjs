@@ -271,11 +271,15 @@ test('handoff retains failure reason and labels the last superseded receipt', as
       },
     },
   ];
+  f.state.acceptanceHistory.push({ platform: 'harmony', state: 'failed',
+    supersededAt: '2026-01-02T00:00:00Z', error: 'First failed replacement' });
   await saveState(f.directory, f.state);
   const report = await storeHandoff(f);
   const acceptance = report.platforms.harmony.acceptance;
   assert.equal(acceptance.status, 'failed');
   assert.equal(acceptance.error, 'Counterpart mismatch');
   assert.equal(acceptance.superseded[0].supersededAt, '2026-01-01T00:00:00Z');
+  assert.equal(acceptance.superseded[0].status, 'passed');
+  assert.equal(acceptance.superseded[0].receipt.artifactSha256, 'c'.repeat(64));
   assert.equal(acceptance.superseded[0].receipt.privateDiagnostic, undefined);
 });
