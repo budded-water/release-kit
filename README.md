@@ -17,6 +17,11 @@ The initial planner expects an Expo `app.json`, `eas.json` and `runtimeVersion.p
 
 ## Use
 
+An opt-in [WeChat developer-upload workflow](docs/wechat-uploads.md) accepts an
+explicit trusted `wechatProject` without Expo inputs. It binds the current version,
+source, artifact and official confirmation task, reusing existing private journals
+and cleanup fencing. It does not extend native plans or authorize review/release.
+
 ```sh
 pnpm add --save-dev 'git+https://github.com/budded-water/release-kit.git#<reviewed-commit>'
 pnpm exec release-kit --project ./release.project.mjs validate --ref <source-commit> \

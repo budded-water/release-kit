@@ -11,7 +11,7 @@ import {
   link,
   realpath,
 } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, relative } from 'node:path';
 
 export const digest = (value) =>
   createHash('sha256')
@@ -21,8 +21,9 @@ export function releasePath(store, id) {
   if (!/^release-[a-f0-9]{24}$/.test(id)) throw new Error('Invalid release ID');
   return join(resolve(store), 'releases', id);
 }
-export async function privateDirectory(path) {
+export async function canonicalPrivatePath(path) {
   // Refuse redirected state and output paths, including existing ancestors.
+  let anchor;
   for (let current = resolve(path); ; current = dirname(current)) {
     let stat;
     try {
@@ -37,8 +38,13 @@ export async function privateDirectory(path) {
       (await realpath(current)) === `/private${current}`;
     if (stat && !systemAlias && (stat.isSymbolicLink() || !stat.isDirectory()))
       throw new Error(`State directory must not traverse symlinks: ${current}`);
+    if (stat && !anchor) anchor = current;
     if (dirname(current) === current) break;
   }
+  return resolve(await realpath(anchor), relative(anchor, resolve(path)));
+}
+export async function privateDirectory(path) {
+  await canonicalPrivatePath(path);
   await mkdir(path, { recursive: true, mode: 0o700 });
 }
 export async function readJson(path) {

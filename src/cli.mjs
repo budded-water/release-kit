@@ -21,6 +21,7 @@ import { summarizeStatus } from './summary.mjs';
 import { recordStoreObservation, storeHandoff } from './operator-store.mjs';
 import { releaseExitCode } from './outcomes.mjs';
 import { createCleanupGuard } from './cleanup.mjs';
+import { wechatMain } from './wechat-cli.mjs';
 
 const defaultRoot = process.cwd();
 const help = `Release CLI (one designated Mac and state store)
@@ -77,6 +78,7 @@ export async function main({
   command: executeCommand = runCommand,
   platformAdapters,
   project,
+  wechatProject,
   providerInspector,
   githubExecutor,
   dispatchBinding,
@@ -85,6 +87,7 @@ export async function main({
   output = console.log,
 } = {}) {
   if (signal?.aborted) return 130;
+  if (args[0] === 'wechat') return wechatMain({ args: args.slice(1), repo, project: wechatProject, command: executeCommand, signal, output });
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
