@@ -18,6 +18,7 @@ import { waitForReleaseStatus } from './polling.mjs';
 import { inspectProviders } from './inspection.mjs';
 import { observeTargets, validateObservationTargets } from './observation-sweep.mjs';
 import { summarizeStatus } from './summary.mjs';
+import { recordStoreObservation, storeHandoff } from './operator-store.mjs';
 import { releaseExitCode } from './outcomes.mjs';
 import { createCleanupGuard } from './cleanup.mjs';
 
@@ -29,6 +30,8 @@ provider-inspect --config <private.json> [--platforms ios,android]
 store-plan --config <private.json> --ref <commit> --platforms ios|android
 store-apply <release-id> --config <private.json> --approve <content-plan-digest>
 store-observe <release-id> --config <private.json>
+store-record <release-id> --receipt <private.json>
+store-handoff <release-id>
 observe --config <private.json> [--release <release-id>] [--request <request-id>]
 plan --config <private.json> --ref <commit> [--platforms ...]
 validate --config <private.json> --ref <commit> [--platforms ...] [--ui]
@@ -88,6 +91,7 @@ export async function main({
     strict: true,
     options: {
       config: { type: 'string' },
+      receipt: { type: 'string' },
       approve: { type: 'string' },
       ref: { type: 'string' },
       platforms: { type: 'string' },
@@ -134,6 +138,8 @@ export async function main({
       'store-plan',
       'store-apply',
       'store-observe',
+      'store-record',
+      'store-handoff',
       'observe',
       'plan',
       'validate',
@@ -147,6 +153,21 @@ export async function main({
     ].includes(operation)
   )
     throw new Error(help);
+  const operatorOperation = ['store-record', 'store-handoff'].includes(operation);
+  if ((values.receipt !== undefined) !== (operation === 'store-record'))
+    throw new Error('--receipt is required only for store-record');
+  if (
+    operatorOperation &&
+    Object.keys(values).some(
+      (key) =>
+        !['receipt', 'state-dir', 'executor', 'publish', 'ui', 'remote', 'summary'].includes(key) ||
+        (['publish', 'ui', 'remote', 'summary'].includes(key) && values[key]) ||
+        (key === 'executor' && values[key] !== 'local'),
+    )
+  )
+    throw new Error(
+      'Operator records accept only an ID, --state-dir and --receipt for store-record',
+    );
   const contentOperation = ['store-plan', 'store-apply', 'store-observe'].includes(operation);
   if (values.summary) {
     if (!['status', 'dispatch-status'].includes(operation))
@@ -229,7 +250,9 @@ export async function main({
     throw new Error('Executor check does not accept release, publication or recovery options');
   const dispatchOperation = ['dispatch-status', 'dispatch-resume'].includes(operation);
   const needsId =
-    ['resume', 'status', 'store-apply', 'store-observe'].includes(operation) || dispatchOperation;
+    ['resume', 'status', 'store-apply', 'store-observe', 'store-record', 'store-handoff'].includes(
+      operation,
+    ) || dispatchOperation;
   if (positionals.length !== (needsId ? 2 : 1)) throw new Error('Invalid positional arguments');
   if (
     (values.publish || values.acceptance?.length) &&
@@ -271,6 +294,18 @@ export async function main({
   const configPath = values.config ?? policy?.releaseConfig;
   const store = resolve(values['state-dir'] ?? policy?.stateDirectory ?? join(repo, '.release'));
   if (policy) assertExecutionPaths(policy, { repo, configPath, store });
+  if (operatorOperation) {
+    const result =
+      operation === 'store-record'
+        ? await recordStoreObservation({
+            store,
+            id: positionals[1],
+            receiptPath: resolve(values.receipt),
+          })
+        : await storeHandoff({ store, id: positionals[1] });
+    output(JSON.stringify(result, null, 2));
+    return 0;
+  }
   if (operation === 'dispatch-status') {
     output(JSON.stringify(await readRequestStatus({ policy, id: positionals[1] }), null, 2));
     return 0;
@@ -511,24 +546,24 @@ export async function main({
       }
     }
     diagnosticsDirectory = join(releasePath(store, plan.id), 'logs');
-    const adapters =
-      platformAdapters ??
-      {};
+    const adapters = platformAdapters ?? {};
     if (operation === 'doctor') {
       if (values.ref)
         throw new Error('Doctor checks the current checkout; use plan to inspect another ref');
       const results = {};
       for (const platform of plan.platforms)
-        results[platform] = await cleanup.run(() => adapters[platform].doctor({
-          root: repo,
-          repoRoot: repo,
-          platform,
-          plan,
-          config,
-          env: environment,
-          command,
-          publicationRequested: values.publish,
-        }));
+        results[platform] = await cleanup.run(() =>
+          adapters[platform].doctor({
+            root: repo,
+            repoRoot: repo,
+            platform,
+            plan,
+            config,
+            env: environment,
+            command,
+            publicationRequested: values.publish,
+          }),
+        );
       output(
         JSON.stringify(
           {

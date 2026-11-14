@@ -51,6 +51,7 @@ try {
     import { main } from '@budded-water/release-kit/cli';
     import { saveState, releasePath } from '@budded-water/release-kit/state';
     import { createRunner } from '@budded-water/release-kit/engine';
+    import { storeHandoff, inspectPrivacyAssociation } from '@budded-water/release-kit/operator-store';
     import { workerMain } from '@budded-water/release-kit/worker';
     const id = 'release-' + 'a'.repeat(24);
     const store = fileURLToPath(new URL('./state', import.meta.url));
@@ -58,6 +59,8 @@ try {
     let result;
     assert.equal(await main({ args: ['status', id, '--state-dir', store, '--summary'], output: s => result = JSON.parse(s) }), 0);
     assert.equal(result.releaseId, id); assert.equal(result.summaryOnly, true);
+    assert.deepEqual((await storeHandoff({ store, id })).observations, []);
+    assert.equal(inspectPrivacyAssociation({ listingAppName: 'Example', policyAppName: 'Example', policyId: 'p1', linkedPolicyId: 'p1', reviewState: 'approved' }).state, 'matched');
     assert.equal(typeof createRunner, 'function'); assert.equal(typeof workerMain, 'function');
     console.log('Installed tarball imports and CLI history read passed.');
   `,
