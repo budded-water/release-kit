@@ -175,6 +175,22 @@ const pick = (value, keys) =>
     keys.filter((key) => Object.hasOwn(value ?? {}, key)).map((key) => [key, value[key]]),
   );
 
+function acceptanceReference(receipt) {
+  return receipt
+    ? pick(receipt, [
+        'source',
+        'platform',
+        'artifactSha256',
+        'checkedAt',
+        'passed',
+        'provenance',
+        'checks',
+        'testedBuild',
+        'evidenceSha256',
+      ])
+    : null;
+}
+
 async function artifactReference(artifact) {
   if (!artifact) return null;
   const result = pick(artifact, [
@@ -267,19 +283,21 @@ async function platformHandoffs(state) {
       acceptance: {
         status: state.acceptanceStatus?.[platform]?.state ?? 'unknown',
         binding,
-        receipt: receipt
-          ? pick(receipt, [
-              'source',
-              'platform',
-              'artifactSha256',
-              'checkedAt',
-              'passed',
-              'provenance',
-              'checks',
-              'testedBuild',
-              'evidenceSha256',
-            ])
-          : null,
+        ...pick(state.acceptanceStatus?.[platform], [
+          'startedAt',
+          'finishedAt',
+          'error',
+          'evidenceSha256',
+        ]),
+        receipt: acceptanceReference(receipt),
+        superseded: (state.acceptanceHistory ?? [])
+          .filter((entry) => entry.platform === platform)
+          .slice(-1)
+          .map((entry) => ({
+            status: entry.state ?? 'unknown',
+            supersededAt: entry.supersededAt,
+            receipt: acceptanceReference(entry.receipt),
+          })),
       },
       outcome: state.outcomes?.[platform]
         ? pick(state.outcomes[platform], [

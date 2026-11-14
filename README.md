@@ -342,5 +342,6 @@ when the recorded source/hash relationship and the corresponding local package
 files match. It becomes `mismatched` for identity or byte changes, `unverified`
 when necessary local references cannot be verified (including legacy operator
 counterparts without a retained descriptor), or `not-recorded` without a receipt.
+The latest failure reason and last superseded receipt remain visible.
 Missing/invalid counterpart declarations are explicit. The command writes no
 release events and performs no SDK, native-service or provider validation.
