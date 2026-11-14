@@ -303,3 +303,50 @@ file integrity, current artifact matching and the operator's next action. Missin
 or changed evidence stays visible. The output is historical and does not query a
 provider. Generate it again at handoff time instead of maintaining a second status
 ledger manually. Snapshot files for different times should be retained separately.
+
+## Harmony provider inspection
+
+`provider-inspect --platforms harmony` performs two bounded GET requests against
+Huawei's China Connect API. It checks the exact package-to-app-ID mapping and
+reads selected formal-release metadata. Harmony-only inspection uses the explicit
+configuration and requires no Expo files, SDK, artifact or release journal.
+
+Private configuration:
+
+```json
+{
+  "schemaVersion": 1,
+  "harmony": { "appId": "example.app" },
+  "stores": {
+    "harmony": {
+      "appId": "123456789",
+      "bundleId": "example.app",
+      "serviceAccountPathEnv": "AGC_SERVICE_ACCOUNT_PATH",
+      "language": "en-US"
+    }
+  }
+}
+```
+
+Point that environment variable to the original Service Account credential JSON,
+owned by the current user with private permissions (`0600`), outside Git. The
+credential needs the vendor's `key_id`, `sub_account` and RSA `private_key` fields.
+JWT signing follows Huawei's PS256, audience and one-hour lifetime contract.
+Private key contents and JWTs are excluded from reports and journals. Authentication failure is reported
+without reflecting provider response bodies. TLS and redirect checks stay active.
+
+Optional `versionId` pins a specific formal draft; a different returned version
+fails inspection. Without it, the provider selects its current formal metadata.
+The report exposes raw release/review codes, version identifiers and the privacy
+agreement ID. It omits review usernames/passwords, identity documents, private
+file URLs and the audit-opinion text. A flag indicates whether an opinion exists.
+Provider visibility remains separate from build/acceptance/release readiness.
+This initial client supports China formal-release reads only. Upload, package
+registration, submission, status reconciliation and other regions retain their
+existing adapter behavior.
+
+Sources are Huawei's [server authorization](https://developer.huawei.com/consumer/en/doc/doccenter-submission/agc-help-connect-api-obtain-server-auth-0000002271134661/),
+[package lookup](https://developer.huawei.com/consumer/cn/doc/app/agc-help-publish-api-appid-list-0000002271000617/)
+and [Harmony app information](https://developer.huawei.com/consumer/cn/doc/app/agc-help-publish-api-appinfo-query-0000002236041422/)
+contracts. Tests use generated local keys and fixture transports. Live account
+permissions require an authorized credential and an actual provider read.

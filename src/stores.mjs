@@ -1,3 +1,4 @@
+import { inspectAgc } from './agc.mjs';
 import { createHash, sign } from 'node:crypto';
 import { constants, createReadStream } from 'node:fs';
 import { access, lstat, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -1540,6 +1541,7 @@ function inspectionReleases(response) {
 
 /** Account visibility only: never use this result to authorize publication. */
 export async function inspectStore(ctx) {
+  if (ctx.platform === 'harmony') return inspectAgc(ctx);
   const report = {
     supported: ['ios', 'android'].includes(ctx.platform),
     ok: false,

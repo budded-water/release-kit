@@ -27,7 +27,7 @@ const defaultRoot = process.cwd();
 const help = `Release CLI (one designated Mac and state store)
 
 doctor --config <private.json> [--platforms ios,android,harmony] [--publish]
-provider-inspect --config <private.json> [--platforms ios,android]
+provider-inspect --config <private.json> [--platforms ios,android,harmony]
 store-plan --config <private.json> --ref <commit> --platforms ios|android
 store-apply <release-id> --config <private.json> --approve <content-plan-digest>
 store-observe <release-id> --config <private.json>

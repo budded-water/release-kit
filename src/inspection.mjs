@@ -22,7 +22,9 @@ export async function inspectProviders({
     configDigest: digest(config),
     scope:
       'Provider visibility for declared store identities only; no effective build identity, publication readiness, artifact ownership or device acceptance attestation.',
-    identitySource: 'static-app-json',
+    identitySource: platforms.every((p) => p === 'harmony')
+      ? 'explicit-harmony-config'
+      : 'static-app-json',
     results: {},
   };
   signal?.throwIfAborted();
@@ -33,55 +35,48 @@ export async function inspectProviders({
   )
     throw new Error('Invalid provider inspection platforms');
   let app;
+  let staticIdentityError = false;
   try {
-    const dynamicFiles = [];
-    for (const name of [
-      'app.config',
-      'app.config.js',
-      'app.config.ts',
-      'app.config.mts',
-      'app.config.cts',
-      'app.config.mjs',
-      'app.config.cjs',
-    ]) {
-      try {
-        const info = await lstat(join(repo, name));
-        if (!info.isFile()) throw new Error('Invalid dynamic config path');
-        dynamicFiles.push(name);
-      } catch (error) {
-        if (error.code !== 'ENOENT') throw error;
+    if (platforms.some((platform) => platform !== 'harmony')) {
+      const dynamicFiles = [];
+      for (const name of [
+        'app.config',
+        'app.config.js',
+        'app.config.ts',
+        'app.config.mts',
+        'app.config.cts',
+        'app.config.mjs',
+        'app.config.cjs',
+      ]) {
+        try {
+          const info = await lstat(join(repo, name));
+          if (!info.isFile()) throw new Error('Invalid dynamic config path');
+          dynamicFiles.push(name);
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
       }
+      report.dynamicConfig = { files: dynamicFiles, evaluated: false };
+      const file = join(repo, 'app.json');
+      const info = await lstat(file);
+      if (!info.isFile() || info.size > 1024 * 1024) throw new Error('Invalid static config');
+      const bytes = await readFile(file);
+      app = JSON.parse(bytes).expo;
+      if (!app || typeof app !== 'object' || Array.isArray(app))
+        throw new Error('Invalid Expo config');
+      report.appConfigDigest = digest(bytes);
     }
-    report.dynamicConfig = { files: dynamicFiles, evaluated: false };
-    const file = join(repo, 'app.json');
-    const info = await lstat(file);
-    if (!info.isFile() || info.size > 1024 * 1024) throw new Error('Invalid static config');
-    const bytes = await readFile(file);
-    app = JSON.parse(bytes).expo;
-    if (!app || typeof app !== 'object' || Array.isArray(app))
-      throw new Error('Invalid Expo config');
-    report.appConfigDigest = digest(bytes);
   } catch {
     signal?.throwIfAborted();
-    for (const platform of platforms)
-      report.results[platform] = {
-        supported: platform !== 'harmony',
-        ok: false,
-        publicationReadiness: 'not-evaluated',
-        checks: [
-          {
-            name: 'project identity',
-            ok: false,
-            message:
-              'A readable regular static app.json is required; redirected or non-file Expo configuration paths are unsupported.',
-          },
-        ],
-      };
-    return { ...report, ok: false };
+    staticIdentityError = true;
   }
   const plan = {
-    version: app.version,
-    appIds: { ios: app.ios?.bundleIdentifier, android: app.android?.package },
+    version: app?.version,
+    appIds: {
+      ios: app?.ios?.bundleIdentifier,
+      android: app?.android?.package,
+      harmony: config.harmony?.appId ?? config.stores?.harmony?.bundleId,
+    },
   };
   report.project = Object.fromEntries(
     platforms
@@ -94,17 +89,17 @@ export async function inspectProviders({
   );
   for (const platform of platforms) {
     signal?.throwIfAborted();
-    if (platform === 'harmony') {
+    if (staticIdentityError && platform !== 'harmony') {
       report.results[platform] = {
-        supported: false,
+        supported: true,
         ok: false,
         publicationReadiness: 'not-evaluated',
         checks: [
           {
-            name: 'provider inspection',
+            name: 'project identity',
             ok: false,
             message:
-              'Harmony provider inspection is unsupported; device delivery and AGC handoff have separate checks.',
+              'A readable regular static app.json is required; redirected or non-file Expo configuration paths are unsupported.',
           },
         ],
       };
