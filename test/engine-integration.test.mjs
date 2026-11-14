@@ -312,3 +312,41 @@ test('GitHub worker SSH verification preserves cleanup uncertainty through sanit
   assert.doesNotMatch(fence, /synthetic-private-ssh-config/);
   await assert.rejects(f.runner().validate(plan), { code: 'CLEANUP_INCOMPLETE' });
 });
+
+test('a newly declared counterpart policy revokes cached mismatched acceptance before publication', async t => {
+  const f = await fixture(t, ['ios']);
+  const built = await f.runner().execute(f.plan);
+  const paths = await f.receipts(built);
+  const receipt = JSON.parse(await readFile(paths.ios, 'utf8'));
+  receipt.testedBuild = { kind: 'counterpart', source: f.plan.source, sha256: 'b'.repeat(64),
+    configurationRelationship: 'Legacy operator counterpart', limitations: 'Synthetic' };
+  await writeFile(paths.ios, JSON.stringify(receipt));
+  const accepted = await f.runner().execute(f.plan, { acceptance: paths });
+  assert.equal(accepted.acceptanceStatus.ios.state, 'passed');
+  f.adapters.ios.inspect = async ({ artifact }) => ({ ...artifact,
+    acceptanceCounterparts: [{ source: f.plan.source, sha256: 'c'.repeat(64) }] });
+  const blocked = await f.runner().execute(f.plan, { publish: true });
+  assert.equal(blocked.acceptance.ios, undefined);
+  assert.equal(blocked.acceptanceStatus.ios.state, 'failed');
+  assert.equal(blocked.acceptanceHistory.at(-1).receipt.testedBuild.sha256, 'b'.repeat(64));
+  assert.equal(f.calls.filter(x => x === 'publish-ios').length, 0);
+  assert.equal(f.calls.filter(x => x === 'build-ios').length, 1);
+});
+
+test('matching declared counterpart acceptance is reused without rebuilding or replacing its receipt', async t => {
+  const f = await fixture(t, ['ios']);
+  f.adapters.ios.inspect = async ({ artifact }) => ({ ...artifact,
+    acceptanceCounterparts: [{ source: f.plan.source, sha256: 'c'.repeat(64) }] });
+  const built = await f.runner().execute(f.plan);
+  const paths = await f.receipts(built);
+  const receipt = JSON.parse(await readFile(paths.ios, 'utf8'));
+  receipt.testedBuild = { kind: 'counterpart', source: f.plan.source, sha256: 'c'.repeat(64),
+    configurationRelationship: 'Verified counterpart', limitations: 'Synthetic' };
+  await writeFile(paths.ios, JSON.stringify(receipt));
+  const accepted = await f.runner().execute(f.plan, { acceptance: paths });
+  const resumed = await f.runner().execute(f.plan);
+  assert.deepEqual(resumed.acceptance.ios, accepted.acceptance.ios);
+  assert.equal(resumed.acceptanceStatus.ios.state, 'passed');
+  assert.equal(f.calls.filter(x => x === 'build-ios').length, 1);
+  assert.equal(f.calls.filter(x => x === 'publish-ios').length, 0);
+});

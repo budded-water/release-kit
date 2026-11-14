@@ -1,3 +1,6 @@
+import { createReadStream } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { assertAcceptanceTestedBuild, validateAcceptanceCounterparts } from './plan.mjs';
 import { lstat, readFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { acquireLock, digest, loadState, releasePath, saveState } from './state.mjs';
@@ -167,6 +170,151 @@ export async function recordStoreObservation({ store, id, receiptPath }) {
   }
 }
 
+const pick = (value, keys) =>
+  Object.fromEntries(
+    keys.filter((key) => Object.hasOwn(value ?? {}, key)).map((key) => [key, value[key]]),
+  );
+
+function acceptanceReference(receipt) {
+  return receipt
+    ? pick(receipt, [
+        'source',
+        'platform',
+        'artifactSha256',
+        'checkedAt',
+        'passed',
+        'provenance',
+        'checks',
+        'testedBuild',
+        'evidenceSha256',
+      ])
+    : null;
+}
+
+async function artifactReference(artifact) {
+  if (!artifact) return null;
+  const result = pick(artifact, [
+    'path',
+    'sha256',
+    'bytes',
+    'appId',
+    'version',
+    'buildNumber',
+    'source',
+    'sourceEvidence',
+    'packageFormat',
+    'signatureVerification',
+    'certificateSha256',
+    'profileType',
+    'signatureToolSha256',
+    'payloadVerification',
+    'payloadSha256',
+    'inspectedAt',
+    'relationship',
+    'limitations',
+  ]);
+  result.integrity = 'unavailable';
+  try {
+    const stat = await lstat(artifact.path);
+    if (stat.isFile() && !stat.isSymbolicLink()) {
+      const hash = createHash('sha256');
+      for await (const chunk of createReadStream(artifact.path)) hash.update(chunk);
+      result.integrity = hash.digest('hex') === artifact.sha256 ? 'matched' : 'changed';
+    }
+  } catch {
+    /* The historical reference remains visible when the file is missing. */
+  }
+  return result;
+}
+
+async function platformHandoffs(state) {
+  const results = {};
+  for (const platform of state.plan.platforms ?? []) {
+    const artifact = state.artifacts?.[platform];
+    const receipt = state.acceptance?.[platform];
+    let identityMatchesCurrent = false;
+    if (receipt && artifact) {
+      try {
+        assertAcceptanceTestedBuild(receipt.testedBuild, state.plan, artifact);
+        identityMatchesCurrent =
+          receipt.source === state.plan.source &&
+          receipt.platform === platform &&
+          receipt.artifactSha256 === artifact.sha256;
+      } catch {
+        /* Preserve the failed relationship rather than a valid-looking pass. */
+      }
+    }
+    let counterparts = [];
+    let counterpartPolicy = 'absent';
+    try {
+      const declared = artifact
+        ? validateAcceptanceCounterparts(artifact, state.plan.source)
+        : null;
+      if (declared) {
+        counterparts = declared;
+        counterpartPolicy = 'valid';
+      }
+    } catch {
+      counterpartPolicy = 'invalid';
+    }
+    const mainReference = await artifactReference(artifact);
+    const references = await Promise.all(counterparts.map(artifactReference));
+    let binding = receipt ? 'mismatched' : 'not-recorded';
+    if (identityMatchesCurrent) {
+      const testedReference =
+        receipt.testedBuild.kind === 'artifact'
+          ? mainReference
+          : references.find(
+              (entry) =>
+                entry?.source === receipt.testedBuild.source &&
+                entry.sha256 === receipt.testedBuild.sha256,
+            );
+      binding =
+        mainReference?.integrity === 'changed' || testedReference?.integrity === 'changed'
+          ? 'mismatched'
+          : mainReference?.integrity === 'matched' && testedReference?.integrity === 'matched'
+            ? 'matched'
+            : 'unverified';
+    }
+    results[platform] = {
+      artifact: mainReference,
+      counterparts: references,
+      counterpartPolicy,
+      acceptance: {
+        status: state.acceptanceStatus?.[platform]?.state ?? 'unknown',
+        binding,
+        ...pick(state.acceptanceStatus?.[platform], [
+          'startedAt',
+          'finishedAt',
+          'error',
+          'evidenceSha256',
+        ]),
+        receipt: acceptanceReference(receipt),
+        superseded: (state.acceptanceHistory ?? [])
+          .filter((entry) => entry.platform === platform && entry.receipt)
+          .slice(-1)
+          .map((entry) => ({
+            status: entry.state ?? 'unknown',
+            supersededAt: entry.supersededAt,
+            receipt: acceptanceReference(entry.receipt),
+          })),
+      },
+      outcome: state.outcomes?.[platform]
+        ? pick(state.outcomes[platform], [
+            'state',
+            'observedAt',
+            'message',
+            'version',
+            'buildNumber',
+            'submissionId',
+            'versionId',
+          ])
+        : null,
+    };
+  }
+  return results;
+}
+
 export async function storeHandoff({ store, id }) {
   const state = await loadState(releasePath(store, id));
   if (!state) throw new Error('Unknown release ID');
@@ -193,6 +341,7 @@ export async function storeHandoff({ store, id }) {
     observations.push({
       ...record,
       evidence,
+      screenshots: evidence.filter((entry) => entry.kind === 'screenshot'),
       artifactMatchesCurrent:
         artifact?.sha256 === record.artifactSha256 && artifact?.appId === record.appId,
     });
@@ -204,5 +353,6 @@ export async function storeHandoff({ store, id }) {
     scope:
       'Historical operator observations; no live provider read, acceptance or retry authority.',
     observations,
+    platforms: await platformHandoffs(state),
   };
 }

@@ -140,6 +140,50 @@ export function acceptanceConfig(config, platform) {
     throw new Error('Acceptance command must be a nonempty argv array');
   return entry;
 }
+export function validateAcceptanceCounterparts(artifact, source) {
+  if (!Object.hasOwn(artifact, 'acceptanceCounterparts')) return null;
+  const counterparts = artifact.acceptanceCounterparts;
+  if (
+    !Array.isArray(counterparts) ||
+    counterparts.some(
+      (entry) =>
+        !entry ||
+        typeof entry !== 'object' ||
+        Array.isArray(entry) ||
+        entry.source !== source ||
+        !/^[a-f0-9]{64}$/.test(entry.sha256 || ''),
+    )
+  )
+    throw new Error('Invalid verified acceptance counterpart declaration');
+  return counterparts;
+}
+
+// Trusted adapters may restrict acceptance to counterparts they actually verified.
+// An absent declaration preserves the existing operator-counterpart contract.
+export function assertAcceptanceTestedBuild(tested, plan, artifact) {
+  const named = (value) =>
+    typeof value === 'string' && value.trim().length > 0 && value.length < 4000;
+  if (
+    !tested ||
+    tested.source !== plan.source ||
+    !/^[a-f0-9]{64}$/.test(tested.sha256) ||
+    !['artifact', 'counterpart'].includes(tested.kind) ||
+    (tested.kind === 'artifact' && tested.sha256 !== artifact.sha256) ||
+    (tested.kind === 'counterpart' &&
+      (!named(tested.configurationRelationship) || !named(tested.limitations)))
+  )
+    throw new Error(
+      'Acceptance must identify the tested build; a counterpart needs its source, hash, configuration relationship and limitations',
+    );
+  const counterparts = validateAcceptanceCounterparts(artifact, plan.source);
+  if (
+    tested.kind === 'counterpart' &&
+    counterparts &&
+    !counterparts.some((entry) => entry.source === tested.source && entry.sha256 === tested.sha256)
+  )
+    throw new Error('Acceptance tested build differs from the verified counterpart');
+}
+
 export async function readAcceptance(path, plan, artifact, expectedSha256) {
   const bytes = await readFile(path);
   const evidenceSha256 = digest(bytes);
@@ -167,18 +211,7 @@ export async function readAcceptance(path, plan, artifact, expectedSha256) {
     throw new Error(
       'Acceptance receipt must identify this source, platform and exact artifact, include passed checks and valid provenance/time',
     );
-  if (
-    !tested ||
-    tested.source !== plan.source ||
-    !/^[a-f0-9]{64}$/.test(tested.sha256) ||
-    !['artifact', 'counterpart'].includes(tested.kind) ||
-    (tested.kind === 'artifact' && tested.sha256 !== artifact.sha256) ||
-    (tested.kind === 'counterpart' &&
-      (!named(tested.configurationRelationship) || !named(tested.limitations)))
-  )
-    throw new Error(
-      'Acceptance must identify the tested build; a counterpart needs its source, hash, configuration relationship and limitations',
-    );
+  assertAcceptanceTestedBuild(tested, plan, artifact);
   return {
     schemaVersion: 1,
     kind: receipt.kind,
