@@ -15,6 +15,7 @@ import {
   assertProductionSource,
   prepareCheckout,
   readAcceptance,
+  assertAcceptanceTestedBuild,
   acceptanceConfig,
 } from './plan.mjs';
 import { prepareStoreContent } from './store-content.mjs';
@@ -920,6 +921,19 @@ export function createRunner({
           await assertCheckout(root, plan.source, command);
           state.artifacts[platform] = await inspect(state, directory, platform, root);
           await saveState(directory, state);
+          if (state.acceptance[platform] &&
+              Object.hasOwn(state.artifacts[platform], 'acceptanceCounterparts')) {
+            try {
+              assertAcceptanceTestedBuild(state.acceptance[platform].testedBuild,
+                state.plan, state.artifacts[platform]);
+            } catch (error) {
+              await beginAcceptance(state, directory, platform);
+              state.acceptanceStatus[platform] = { state: 'failed', finishedAt: now(),
+                error: errorMessage(error) };
+              await saveState(directory, state);
+              throw error;
+            }
+          }
           if (!state.acceptance[platform] || acceptance[platform])
             await accept(state, directory, platform, root, acceptance, acceptanceDigests);
           if (!state.publicationRequested) {
