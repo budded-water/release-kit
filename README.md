@@ -303,3 +303,44 @@ file integrity, current artifact matching and the operator's next action. Missin
 or changed evidence stays visible. The output is historical and does not query a
 provider. Generate it again at handoff time instead of maintaining a second status
 ledger manually. Snapshot files for different times should be retained separately.
+
+### Verified acceptance counterparts
+
+A trusted platform adapter may return `artifact.acceptanceCounterparts`, an array
+of descriptors with the pinned release `source` and exact signed `sha256`.
+Additional descriptive fields such as `path`, version, signature and payload
+metadata may be retained for handoff. The adapter owns verification of the
+relationship before declaring it. Receipts and candidate configuration cannot
+author these declarations.
+
+When a declaration exists, a native-acceptance receipt with
+`testedBuild.kind: "counterpart"` must match one of those source/hash pairs.
+An empty declaration accepts no counterpart. Direct artifact acceptance retains
+its exact main-artifact hash rule. Missing declarations preserve the historical
+operator-counterpart contract for existing platforms and journals. Malformed
+explicit declarations fail closed.
+
+Resume checks cached acceptance against freshly inspected declarations. A mismatch
+revokes the cached approval, retains it in acceptance history and stops before
+publication. Supply a truthful replacement receipt after resolving the actual
+package relationship. Read-only provider reconciliation remains a separate path.
+This is an additive artifact contract in existing schema-v1 journals. A control
+rollback must retain a runtime that enforces declared counterparts whenever a
+release relies on this policy; an older runtime ignores the new field.
+
+### Complete historical handoff
+
+`store-handoff` also emits `platforms` with the main artifact, declared counterparts,
+recorded native acceptance and selected outcome fields, even before any manual
+store observation exists. Artifact hashes are checked by streaming regular local
+files, including App Packs larger than the evidence-file budget. Each per-draft
+observation includes its screenshot evidence in receipt order. This order records
+the receipt and does not independently verify the provider's gallery order.
+
+Acceptance `status` preserves its journaled history. `binding` is `matched` only
+when the recorded source/hash relationship and the corresponding local package
+files match. It becomes `mismatched` for identity or byte changes, `unverified`
+when necessary local references cannot be verified (including legacy operator
+counterparts without a retained descriptor), or `not-recorded` without a receipt.
+Missing/invalid counterpart declarations are explicit. The command writes no
+release events and performs no SDK, native-service or provider validation.

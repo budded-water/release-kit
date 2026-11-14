@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm, readdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acquireLock, loadState, releasePath, saveState } from './state.mjs';
+import { acquireLock, digest, loadState, releasePath, saveState } from './state.mjs';
 import {
   recordStoreObservation,
   storeHandoff,
@@ -176,4 +176,82 @@ test('old journals produce an empty handoff and redirected evidence is refused',
     /regular file/,
   );
   assert.equal((await readdir(join(f.directory, 'events'))).length, 1);
+});
+
+test('handoff combines large artifacts, exact counterparts, acceptance and per-draft screenshot order', async (t) => {
+  const f = await fixture(t);
+  const mainPath = join(f.store, 'main.app'),
+    debugPath = join(f.store, 'debug.hap');
+  const mainBytes = Buffer.alloc(21 * 1024 * 1024, 1);
+  await writeFile(mainPath, mainBytes);
+  await writeFile(debugPath, 'debug package');
+  const source = f.state.plan.source;
+  f.state.artifacts.harmony = {
+    appId: 'example.app',
+    path: mainPath,
+    sha256: digest(mainBytes),
+    version: '1.2.3',
+    buildNumber: '42',
+    source,
+    packageFormat: 'app',
+    profileType: 'release',
+    acceptanceCounterparts: [
+      { path: debugPath, source, sha256: digest('debug package'), profileType: 'debug' },
+    ],
+  };
+  const artifact = f.state.artifacts.harmony;
+  f.state.acceptance = {
+    harmony: {
+      source,
+      platform: 'harmony',
+      artifactSha256: artifact.sha256,
+      testedBuild: {
+        kind: 'counterpart',
+        source,
+        sha256: digest('debug package'),
+        configurationRelationship: 'Same payload',
+        limitations: 'Synthetic test',
+      },
+      passed: true,
+    },
+  };
+  f.state.acceptanceStatus = { harmony: { state: 'passed' } };
+  await saveState(f.directory, f.state);
+  await writeFile(join(f.store, 'second.txt'), 'Another synthetic screenshot');
+  await f.record({
+    ...f.receipt,
+    artifactSha256: artifact.sha256,
+    evidence: [
+      { path: 'second.txt', kind: 'screenshot' },
+      { path: 'receipt.json', kind: 'document' },
+      { path: 'proof.txt', kind: 'screenshot' },
+    ],
+  });
+  const before = await readdir(join(f.directory, 'events'));
+  let report = await storeHandoff(f);
+  assert.equal(report.platforms.harmony.artifact.integrity, 'matched');
+  assert.equal(report.platforms.harmony.artifact.version, '1.2.3');
+  assert.equal(report.platforms.harmony.counterparts[0].profileType, 'debug');
+  assert.equal(report.platforms.harmony.acceptance.binding, 'matched');
+  assert.deepEqual(
+    report.observations[0].screenshots.map((x) => x.path),
+    [join(f.store, 'second.txt'), join(f.store, 'proof.txt')],
+  );
+  assert.deepEqual(await readdir(join(f.directory, 'events')), before);
+  await writeFile(debugPath, 'replaced');
+  report = await storeHandoff(f);
+  assert.equal(report.platforms.harmony.counterparts[0].integrity, 'changed');
+  assert.equal(report.platforms.harmony.acceptance.status, 'passed');
+  assert.equal(report.platforms.harmony.acceptance.binding, 'mismatched');
+  await rm(debugPath);
+  assert.equal((await storeHandoff(f)).platforms.harmony.acceptance.binding, 'unverified');
+});
+
+test('malformed counterpart policies stay visible in handoff without approving cached receipts', async (t) => {
+  const f = await fixture(t);
+  f.state.artifacts.harmony.acceptanceCounterparts = {};
+  await saveState(f.directory, f.state);
+  const report = await storeHandoff(f);
+  assert.equal(report.platforms.harmony.counterpartPolicy, 'invalid');
+  assert.equal(report.platforms.harmony.acceptance.binding, 'not-recorded');
 });
