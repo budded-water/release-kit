@@ -153,6 +153,28 @@ test('AGC reports provider rejection and malformed bodies without reflecting the
     });
 });
 
+test('malformed present metadata fails closed instead of becoming a successful empty projection', async (t) => {
+  for (const info of [
+    { releaseState: 'bad', versionId: 123 },
+    { reviewState: null },
+    { versionId: 123 },
+    { versionNumber: 'x'.repeat(129) },
+    { updateTime: 'bad\nvalue' },
+  ]) {
+    const f = await fixture(t);
+    f.ctx.fetch = async (url) =>
+      Response.json(
+        url.includes('appid-list')
+          ? { ret: { code: 0 }, appids: [{ value: f.cfg.appId }] }
+          : { ret: { code: 0 }, appInfo: info },
+      );
+    const report = await inspectAgc(f.ctx);
+    assert.equal(report.ok, false);
+    assert.equal(report.checks[0].code, 'AGC_RESPONSE');
+    assert.equal(report.app, undefined);
+  }
+});
+
 test('cancellation prevents a subsequent query and a specified version cannot be substituted', async (t) => {
   const f = await fixture(t);
   const ac = new AbortController();

@@ -177,9 +177,13 @@ export async function inspectAgc(ctx) {
         'AGC_IDENTITY',
         'Provider version differs from the configured formal-release target.',
       );
-    report.app = { appId: cfg.appId, bundleId: cfg.bundleId, releaseType: 1 };
-    for (const key of ['releaseState', 'reviewState', 'versionCode', 'onShelfVersionCode'])
-      if (Number.isSafeInteger(info[key])) report.app[key] = info[key];
+    const app = { appId: cfg.appId, bundleId: cfg.bundleId, releaseType: 1 };
+    for (const key of ['releaseState', 'reviewState', 'versionCode', 'onShelfVersionCode']) {
+      if (!Object.hasOwn(info, key)) continue;
+      if (!Number.isSafeInteger(info[key]))
+        throw new AgcError('AGC_RESPONSE', 'AGC app-info metadata has an invalid field type.');
+      app[key] = info[key];
+    }
     for (const key of [
       'versionNumber',
       'versionId',
@@ -188,15 +192,15 @@ export async function inspectAgc(ctx) {
       'privacyAgreementId',
       'updateTime',
       'releaseTime',
-    ])
-      if (
-        typeof info[key] === 'string' &&
-        info[key].length <= 128 &&
-        !/[\x00-\x1f]/.test(info[key])
-      )
-        report.app[key] = info[key];
-    report.app.auditOpinionPresent =
+    ]) {
+      if (!Object.hasOwn(info, key)) continue;
+      if (typeof info[key] !== 'string' || info[key].length > 128 || /[\x00-\x1f]/.test(info[key]))
+        throw new AgcError('AGC_RESPONSE', 'AGC app-info metadata has an invalid field type.');
+      app[key] = info[key];
+    }
+    app.auditOpinionPresent =
       typeof data.auditInfo?.auditOpinion === 'string' && !!data.auditInfo.auditOpinion.trim();
+    report.app = app;
     report.checks.push({
       name: 'harmony provider visibility',
       ok: true,
