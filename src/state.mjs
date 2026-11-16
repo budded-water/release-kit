@@ -103,6 +103,13 @@ export async function acquireLock(path) {
     await unlink(path);
   };
 }
+// One event-integrity rule for normal replay and bounded read-only observers.
+export function verifyJournalEvent(event, sequence, previous) {
+  if (!event || event.sequence !== sequence || event.previous !== previous ||
+      event.digest !== digest(event.state))
+    throw new Error('Release journal integrity mismatch');
+  return { state: event.state, digest: digest(event) };
+}
 export async function loadState(directory) {
   const events = join(directory, 'events');
   let names;
@@ -118,14 +125,9 @@ export async function loadState(directory) {
     if (names[index] !== `${String(index + 1).padStart(8, '0')}.json`)
       throw new Error('Release journal has a missing event');
     const event = await readJson(join(events, names[index]));
-    if (
-      event.sequence !== index + 1 ||
-      event.previous !== previous ||
-      event.digest !== digest(event.state)
-    )
-      throw new Error('Release journal integrity mismatch');
-    state = event.state;
-    previous = digest(event);
+    const verified = verifyJournalEvent(event, index + 1, previous);
+    state = verified.state;
+    previous = verified.digest;
   }
   return state;
 }

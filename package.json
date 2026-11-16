@@ -25,6 +25,7 @@
     "bin",
     "docs/wechat-uploads.md",
     "docs/store-queries.md",
+    "docs/release-storage.md",
     "README.md",
     "SECURITY.md"
   ],

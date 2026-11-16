@@ -1,0 +1,237 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink, link, lstat, open } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { inspectStorage, planStorageCleanup } from './storage.mjs';
+import { saveState, releasePath, loadState } from './state.mjs';
+import { main } from './cli.mjs';
+
+const id = suffix => 'release-' + suffix.repeat(24);
+const state = suffix => ({ schemaVersion: 1, plan: { id: id(suffix), source: suffix.repeat(40), platforms: ['ios'] },
+  stages: {}, artifacts: {}, outcomes: {}, checkpoints: {} });
+async function fixture(t) {
+  const root = await mkdtemp(join(tmpdir(), 'storage-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = join(root, 'state'); await mkdir(store);
+  return { root, store };
+}
+async function file(path, data) { await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, data); }
+async function tree(root, path = '') {
+  const result = [];
+  for (const entry of (await readdir(join(root, path), { withFileTypes: true })).sort((a,b)=>a.name.localeCompare(b.name))) {
+    const rel = join(path, entry.name);
+    result.push(entry.isDirectory() ? [rel, 'directory'] : [rel, entry.isSymbolicLink() ? 'link' : (await readFile(join(root, rel))).toString('base64')]);
+    if (entry.isDirectory()) result.push(...await tree(root, rel));
+  }
+  return result;
+}
+
+test('two release formats inventory bytes and preview without project imports or state writes', async t => {
+  const { root, store } = await fixture(t);
+  for (const [suffix, kind] of [['a', undefined], ['b', 'consumer-testflight-v1']]) {
+    const s = state(suffix); if (kind) s.plan.kind = kind;
+    await saveState(releasePath(store, s.plan.id), s);
+    await file(join(releasePath(store, s.plan.id), 'validation/node_modules/dependency.bin'), '123456789');
+    await file(join(releasePath(store, s.plan.id), 'build-ios/output.bin'), 'abcd');
+  }
+  const before = await tree(root);
+  const inventory = await inspectStorage({ stateDirectory: store });
+  assert.equal(inventory.observationComplete, true);
+  assert.equal(inventory.workspaces.length, 4);
+  assert.equal(inventory.workspaces.find(w=>w.path.endsWith('build-ios')).apparentBytes, 4);
+  assert.equal(inventory.releases.every(r=>r.verifiedEvents===1), true);
+  const preview = planStorageCleanup(inventory);
+  assert.equal(preview.counts.reviewCandidates, 4); assert.equal(preview.applySupported, false);
+  assert.equal(preview.deletionAuthorized, false); assert.equal(preview.reclaimableBytes, null);
+  assert.deepEqual(planStorageCleanup(inventory), preview);
+  let printed;
+  assert.equal(await main({args:['storage-plan','--state-dir',store],repo:'/absent', project:{},
+    command:()=>{throw Error('unexpected execution');},output:s=>printed=JSON.parse(s)}),0);
+  assert.equal(printed.kind,'release-storage-cleanup-preview-v1');
+  assert.deepEqual(await tree(root), before);
+});
+
+test('all retained snapshots and other releases protect referenced workspace descendants and ancestors', async t => {
+  const { store } = await fixture(t); const a=state('a'), b=state('b');
+  const directory=releasePath(store,a.plan.id), workspace=join(directory,'validation');
+  await file(join(workspace,'evidence/proof.bin'),'proof');
+  a.acceptance={ios:{path:join(workspace,'evidence/proof.bin')}};await saveState(directory,a);
+  delete a.acceptance;await saveState(directory,a);
+  b.evidenceRoot=directory;await saveState(releasePath(store,b.plan.id),b);
+  const inventory=await inspectStorage({stateDirectory:store});
+  assert.equal(inventory.observationComplete,true);
+  assert.deepEqual(inventory.workspaces[0].referencedBy,[id('a'),id('b')]);
+  assert(inventory.workspaces[0].protectionReasons.includes('retained-journal-reference'));
+  assert.equal(planStorageCleanup(inventory).counts.reviewCandidates,0);
+});
+
+test('literal missing/external and ambiguous relative paths conservatively prevent review candidates', async t => {
+  for (const value of ['/external/proof','relative/proof','file:///external/proof',null]) {
+    const {store}=await fixture(t);const s=state('a');
+    s.acceptance={path:value??join(store,'missing-proof')};await saveState(releasePath(store,s.plan.id),s);
+    await file(join(releasePath(store,s.plan.id),'validation/cache'),'cache');
+    const inventory=await inspectStorage({stateDirectory:store});
+    assert(inventory.workspaces[0].protectionReasons.includes('journal-reference-scope-unresolved'));
+    assert.equal(planStorageCleanup(inventory).counts.reviewCandidates,0);
+  }
+});
+
+test('unknown operations and on-disk ownership remain protected, including empty lock files', async t => {
+  for (const marker of ['locks/cleanup-incomplete.lock','dispatch/requests/pending/request.json','targets/reservation.json']) {
+    const {store}=await fixture(t);const s=state('a');await saveState(releasePath(store,s.plan.id),s);
+    await file(join(releasePath(store,s.plan.id),'build-ios/output'),'bytes');await file(join(store,marker),'');
+    const result=await inspectStorage({stateDirectory:store});
+    assert.equal(result.observationComplete,true);assert.equal(planStorageCleanup(result).counts.reviewCandidates,0);
+    assert(result.workspaces[0].protectionReasons.length);
+  }
+  const {store}=await fixture(t);const s=state('a');s.stages.build={status:'unknown'};
+  await saveState(releasePath(store,s.plan.id),s);await file(join(releasePath(store,s.plan.id),'build-ios/cache'),'x');
+  assert((await inspectStorage({stateDirectory:store})).workspaces[0].protectionReasons.includes('release-operations-unsettled-or-unrecognized'));
+});
+
+test('corrupt event integrity disables candidates and follows the same rule as normal journal replay', async t => {
+  const {store}=await fixture(t);const s=state('a');const directory=releasePath(store,s.plan.id);
+  await saveState(directory,s);await file(join(directory,'validation/cache'),'x');
+  const event=join(directory,'events/00000001.json');const raw=JSON.parse(await readFile(event));raw.state.changed=true;await writeFile(event,JSON.stringify(raw));
+  await assert.rejects(loadState(directory),/integrity mismatch/);
+  const result=await inspectStorage({stateDirectory:store});assert.equal(result.observationComplete,false);
+  assert.equal(planStorageCleanup(result).counts.reviewCandidates,0);assert(result.errors.some(e=>e.code==='journal-invalid'));
+});
+
+test('symlink targets are not traversed or measured and workspace links remain opaque', async t => {
+  const {root,store}=await fixture(t);const s=state('a');await saveState(releasePath(store,s.plan.id),s);
+  const workspace=join(releasePath(store,s.plan.id),'validation');await mkdir(workspace);
+  await file(join(root,'external-secret'),'not to be measured');await symlink(root,join(workspace,'outside'));
+  const result=await inspectStorage({stateDirectory:store});assert.equal(result.observationComplete,true);
+  assert.equal(result.workspaces[0].apparentBytes,0);assert.equal(result.totals.symlinks,1);
+  assert(result.workspaces[0].protectionReasons.includes('contains-opaque-symlinks'));
+  const alias=join(root,'alias');await symlink(store,alias);
+  await assert.rejects(inspectStorage({stateDirectory:alias}),/symlink/);
+});
+
+test('hard-linked bytes are counted logically per path but allocations are unique and not reclaimable estimates', async t => {
+  const {store}=await fixture(t);await file(join(store,'one'),'0123456789');await link(join(store,'one'),join(store,'two'));
+  const result=await inspectStorage({stateDirectory:store});assert.equal(result.totals.apparentBytes,20);
+  assert.equal(result.totals.hardLinkedFiles,2);assert.equal(result.reclaimableBytes,null);
+  const single=await lstat(join(store,'one'));
+  assert.equal(result.totals.observedUniqueAllocatedBytes, Number.isSafeInteger(single.blocks) ? single.blocks*512 : null);
+});
+
+test('entry and journal byte budgets return partial reports without review candidates', async t => {
+  const {store}=await fixture(t);const s=state('a');await saveState(releasePath(store,s.plan.id),s);
+  await file(join(releasePath(store,s.plan.id),'validation/cache'),'x');
+  const result=await inspectStorage({stateDirectory:store,maxEntries:3});assert.equal(result.observationComplete,false);
+  assert(result.errors.some(e=>e.code==='entry-budget-exhausted'));assert.equal(planStorageCleanup(result).counts.reviewCandidates,0);
+  await writeFile(join(releasePath(store,s.plan.id),'events/00000001.json'),'x'.repeat(8*1024*1024+1));
+  const oversized=await inspectStorage({stateDirectory:store});assert.equal(oversized.observationComplete,false);
+  assert(oversized.errors.some(e=>e.code==='journal-byte-budget-exhausted'));
+});
+
+test('missing roots and invalid CLI inputs do not create directories; cancellation never returns a report', async t => {
+  const {root,store}=await fixture(t);await assert.rejects(inspectStorage({stateDirectory:join(root,'absent')}));
+  assert(!(await readdir(root)).includes('absent'));
+  const controller=new AbortController();controller.abort();
+  await assert.rejects(inspectStorage({stateDirectory:store,signal:controller.signal}),{name:'AbortError'});
+  let help;assert.equal(await main({args:['storage-inspect','--help'],output:s=>help=s}),0);assert.match(help,/no deletion/);
+  for (const extra of [['--apply'],['--publish'],['--config','/private/config'],['release-123'],['--max-entries','1000001'],['--timeout-seconds','301']])
+    await assert.rejects(main({args:['storage-plan','--state-dir',store,...extra],output:()=>{}}));
+});
+
+test('metadata contents stay private while unrecognized directories remain outside cleanup candidates', async t => {
+  const {store}=await fixture(t);const s=state('a');s.privateContact='synthetic-contact-value';s.password='synthetic-password-value';
+  await saveState(releasePath(store,s.plan.id),s);
+  await file(join(store,'unclassified/large.bin'),'12345');
+  const result=await inspectStorage({stateDirectory:store});
+  assert.equal(result.observationComplete,true);assert.equal(result.workspaces.length,0);
+  assert(!JSON.stringify(result).includes('synthetic-contact-value'));assert(!JSON.stringify(result).includes('synthetic-password-value'));
+  assert.equal(result.groups.find(group=>group.path==='unclassified').apparentBytes,5);
+});
+
+test('a linked journal and a missing event never become a complete absence or a review candidate', async t => {
+  const {root,store}=await fixture(t);const s=state('a');const dir=releasePath(store,s.plan.id);
+  await saveState(dir,s);await file(join(dir,'validation/cache'),'x');
+  const event=join(dir,'events/00000001.json');const original=await readFile(event);await rm(event);
+  await file(join(root,'outside-event'),original);await symlink(join(root,'outside-event'),event);
+  const linked=await inspectStorage({stateDirectory:store});assert.equal(linked.observationComplete,false);
+  assert.equal(planStorageCleanup(linked).counts.reviewCandidates,0);
+  await rm(event);await file(join(dir,'events/00000002.json'),original);
+  const missing=await inspectStorage({stateDirectory:store});assert.equal(missing.observationComplete,false);
+  assert(missing.errors.some(error=>error.code==='journal-sequence-invalid'));
+});
+
+test('asynchronous caller cancellation stops before any report is emitted', async t => {
+  const {store}=await fixture(t);const controller=new AbortController();let printed=false;
+  const result=main({args:['storage-inspect','--state-dir',store],signal:controller.signal,output:()=>{printed=true;}});
+  setImmediate(()=>controller.abort());
+  await assert.rejects(result,{name:'AbortError'});assert.equal(printed,false);
+});
+
+test('pure preview rejects escaping and unrecognized workspace targets and incomplete replay stays protected', async t => {
+  const {store}=await fixture(t);const s=state('a');await saveState(releasePath(store,s.plan.id),s);
+  await file(join(releasePath(store,s.plan.id),'validation/cache'),'x');
+  const inventory=await inspectStorage({stateDirectory:store});
+  assert.equal(planStorageCleanup({...inventory,observationComplete:false}).counts.reviewCandidates,0);
+  for(const path of ['/outside','../outside','releases/'+id('a')+'/arbitrary','releases/'+id('b')+'/validation']){
+    const bad=structuredClone(inventory);bad.workspaces[0].path=path;
+    await assert.throws(()=>planStorageCleanup(bad));
+  }
+});
+
+test('independent project roots never share references, byte counts or preview state', async t => {
+  const first=await fixture(t),second=await fixture(t);const a=state('a'),b=state('b');
+  a.evidenceRoot='/external/protected';await saveState(releasePath(first.store,a.plan.id),a);
+  await saveState(releasePath(second.store,b.plan.id),b);
+  await file(join(releasePath(first.store,a.plan.id),'validation/cache'),'1234567');
+  await file(join(releasePath(second.store,b.plan.id),'validation/cache'),'123');
+  const protectedInventory=await inspectStorage({stateDirectory:first.store});
+  const independentInventory=await inspectStorage({stateDirectory:second.store});
+  assert.equal(protectedInventory.workspaces[0].apparentBytes,7);
+  assert.equal(independentInventory.workspaces[0].apparentBytes,3);
+  assert.equal(planStorageCleanup(protectedInventory).counts.reviewCandidates,0);
+  assert.equal(planStorageCleanup(independentInventory).counts.reviewCandidates,1);
+  assert.deepEqual(independentInventory.releases.map(r=>r.releaseId),[b.plan.id]);
+});
+
+test('a real journal writer growing a file during its bounded read disables the preview', async t => {
+  const {store}=await fixture(t);const s=state('a'),dir=releasePath(store,s.plan.id);
+  await saveState(dir,s);await file(join(dir,'validation/cache'),'x');
+  const event=join(dir,'events/00000001.json'), originalBytes=await readFile(event);
+  const handle=await open(event,'r'),prototype=Object.getPrototypeOf(handle);await handle.close();
+  const read=prototype.read;let changed=false;
+  t.mock.method(prototype,'read',async function(...args){
+    const result=await read.apply(this,args);
+    if(result.bytesRead && !changed){changed=true;await writeFile(event,Buffer.concat([originalBytes,Buffer.from(' ')]));}
+    return result;
+  });
+  const inventory=await inspectStorage({stateDirectory:store});
+  assert.equal(changed,true);assert.equal(inventory.observationComplete,false);
+  assert(inventory.errors.some(error=>error.code==='journal-changed'));
+  assert.equal(planStorageCleanup(inventory).counts.reviewCandidates,0);
+  assert.deepEqual(await readFile(event),Buffer.concat([originalBytes,Buffer.from(' ')]));
+});
+
+test('expired overall budget is partial rather than a late successful observation', async t => {
+  const {store}=await fixture(t);let reads=0;
+  t.mock.method(Date,'now',()=>reads++===0 ? 0 : 10);
+  const inventory=await inspectStorage({stateDirectory:store,timeoutMs:1});
+  assert.equal(inventory.observationComplete,false);assert(inventory.errors.some(error=>error.code==='timeout'));
+  assert.equal(planStorageCleanup(inventory).counts.reviewCandidates,0);
+});
+
+test('unsupported nested state shapes and stale availability never clear unknown operation protection', async t => {
+  for(const field of ['stages','checkpoints','outcomes','artifacts']) {
+    const {store}=await fixture(t);const s=state('a');s[field]={ios:true};
+    await saveState(releasePath(store,s.plan.id),s);await file(join(releasePath(store,s.plan.id),'build-ios/cache'),'x');
+    const inventory=await inspectStorage({stateDirectory:store});
+    assert.equal(inventory.observationComplete,false);
+    assert(inventory.errors.some(error=>error.code==='journal-schema-unsupported'));
+    assert.equal(planStorageCleanup(inventory).counts.reviewCandidates,0);
+  }
+  const {store}=await fixture(t),s=state('a');
+  s.testflight={build:{state:'unknown'},submission:{state:'finished'},apple:{availabilityVerified:true}};
+  await saveState(releasePath(store,s.plan.id),s);await file(join(releasePath(store,s.plan.id),'build-ios/cache'),'x');
+  const inventory=await inspectStorage({stateDirectory:store});assert.equal(inventory.observationComplete,true);
+  assert(inventory.workspaces[0].protectionReasons.includes('release-operations-unsettled-or-unrecognized'));
+  assert.equal(planStorageCleanup(inventory).counts.reviewCandidates,0);
+});

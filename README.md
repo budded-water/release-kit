@@ -134,6 +134,16 @@ Installed managed-controller adoption remains separate and deferred; these reads
 not certify full release readiness.
 Existing journal-bound status/observe and publication contracts remain unchanged.
 
+## Read-only release storage
+
+`storage-inspect --state-dir /absolute/private/state` measures one existing state
+root without project/provider execution. `storage-plan` produces a non-executable
+cleanup preview with reference and ownership protection reasons. Both are read-only;
+partial scans never produce review candidates and neither authorizes deletion.
+See [storage measurements and preview limits](docs/release-storage.md). Installation,
+runner/toolchain cleanup, actual garbage collection and cache invalidation remain
+separate work; a workspace can contain evidence or inputs still needed by recovery.
+
 ## Google Play keyless authentication
 
 The existing `stores.android.serviceAccountPathEnv` JSON-key mode remains supported.

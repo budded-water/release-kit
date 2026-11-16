@@ -1,3 +1,4 @@
+import { storageMain } from './storage-cli.mjs';
 import { storeReadMain } from './store-read-cli.mjs';
 import { fileURLToPath } from 'node:url';
 import { resolve, join } from 'node:path';
@@ -27,6 +28,8 @@ import { wechatMain } from './wechat-cli.mjs';
 const defaultRoot = process.cwd();
 const help = `Release CLI (one designated Mac and state store)
 
+storage-inspect --state-dir <existing-directory>
+storage-plan --state-dir <existing-directory>
 doctor --config <private.json> [--platforms ios,android,harmony] [--publish]
 store-versions --config <private.json>
 store-status --config <private.json> --version <candidate> [--build-id <expected-apple-build>]
@@ -91,6 +94,7 @@ export async function main({
   output = console.log,
 } = {}) {
   if (signal?.aborted) return 130;
+  if (['storage-inspect', 'storage-plan'].includes(args[0])) return storageMain({ args, signal, output });
   if (['store-versions', 'store-status', 'store-preflight'].includes(args[0])) return storeReadMain({ args, environment, signal, output });
   if (args[0] === 'wechat') return wechatMain({ args: args.slice(1), repo, project: wechatProject, command: executeCommand, signal, output });
   const { values, positionals } = parseArgs({
