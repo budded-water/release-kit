@@ -58,6 +58,7 @@ export async function inspectStorage({ stateDirectory, maxEntries, timeoutMs, si
   let visited = 0, apparentBytes = 0, allocatedBytes = 0, allocationKnown = true, symlinks = 0, hardLinkedFiles = 0;
   let metadataBytes = 0, objectNodes = 0, errorCount = 0;
   let metadataPhase = true;
+  let referenceResolutionComplete = false;
   const fail = code => Object.assign(new Error(code), { storageCode: code });
   const check = () => {
     signal?.throwIfAborted();
@@ -251,6 +252,7 @@ export async function inspectStorage({ stateDirectory, maxEntries, timeoutMs, si
       check();
       if (!seen.has(rel)) for (const owner of owners) referenceUnknown.add(owner);
     }
+    referenceResolutionComplete = true;
     // Guard histories and selected directory inventories against ordinary concurrent writes.
     for (const [rel, expected] of directoryStamps) {
       check();
@@ -274,7 +276,7 @@ export async function inspectStorage({ stateDirectory, maxEntries, timeoutMs, si
       check();
       const reasons = new Set(globalProtection);
       if (workspace.symlinks) reasons.add('contains-opaque-symlinks');
-      if (referenceUnknown.size) reasons.add('journal-reference-scope-unresolved');
+      if (!referenceResolutionComplete || referenceUnknown.size) reasons.add('journal-reference-scope-unresolved');
       for (const reason of releases.get(workspace.releaseId)?.reasons ?? []) reasons.add(reason);
       const referencedBy = new Set(workspaceReferences.get(workspace.path));
       const parts = workspace.path.split(sep);
@@ -303,7 +305,7 @@ export async function inspectStorage({ stateDirectory, maxEntries, timeoutMs, si
     totals: { visitedEntries: Math.min(visited, maxEntries), apparentBytes, observedUniqueAllocatedBytes: allocationKnown ? allocatedBytes : null, symlinks, hardLinkedFiles },
     groups: [...groups.values()].sort((a, b) => a.path.localeCompare(b.path)),
     releases: [...releases.values()].map(release => ({ releaseId: release.id, verifiedEvents: release.verifiedEvents,
-      referenceScopeResolved: release.journalVerified && !referenceUnknown.has(release.id), protectionReasons: [...release.reasons].sort() })),
+      referenceScopeResolved: release.journalVerified && referenceResolutionComplete && !referenceUnknown.has(release.id), protectionReasons: [...release.reasons].sort() })),
     workspaces: workspaceReports, errors, errorsTruncated: errorCount > errors.length, reclaimableBytes: null, deletionAuthorized: false };
   signal?.throwIfAborted();
   if (Date.now() >= deadline && report.observationComplete) {

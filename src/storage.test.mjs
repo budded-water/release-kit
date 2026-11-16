@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink, link, lstat, open } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink, link, lstat, open, opendir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inspectStorage, planStorageCleanup } from './storage.mjs';
@@ -209,6 +209,29 @@ test('larger explicit scans remain bounded through both the API and CLI', async 
     assert.equal(report.totals.apparentBytes,3);
   }
   await assert.rejects(inspectStorage({stateDirectory:store,maxEntries:10000001}),/entry budget/);
+});
+
+test('timeout during deferred measurement retains journal checks without claiming resolved deep references', async t => {
+  const {store}=await fixture(t),s=state('a'),dir=releasePath(store,s.plan.id);
+  const workspace=join(dir,'validation');await file(join(workspace,'cache'),'cache');
+  s.evidenceRoot=join(workspace,'missing-proof');await saveState(dir,s);
+  const handle=await opendir(workspace),prototype=Object.getPrototypeOf(handle);await handle.close();
+  const descriptor=Object.getOwnPropertyDescriptor(prototype,Symbol.asyncIterator);
+  const canonicalWorkspace=await realpath(workspace);let expired=false;
+  // Restore the descriptor directly: Node 22's mock restore corrupts this symbol method.
+  Object.defineProperty(prototype,Symbol.asyncIterator,{...descriptor,value:function(...args){
+    if(this.path===canonicalWorkspace) expired=true;
+    return descriptor.value.apply(this,args);
+  }});
+  t.mock.method(Date,'now',()=>expired?1000:0);
+  let inventory;
+  try { inventory=await inspectStorage({stateDirectory:store,timeoutMs:100}); }
+  finally { Object.defineProperty(prototype,Symbol.asyncIterator,descriptor); }
+  assert(expired);assert.equal(inventory.releases[0].verifiedEvents,1);
+  assert.equal(inventory.releases[0].referenceScopeResolved,false);
+  assert.equal(inventory.observationComplete,false);
+  assert(inventory.errors.some(e=>e.code==='timeout'));
+  assert.equal(planStorageCleanup(inventory).counts.reviewCandidates,0);
 });
 
 test('metadata contents stay private while unrecognized directories remain outside cleanup candidates', async t => {

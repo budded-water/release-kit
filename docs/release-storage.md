@@ -43,6 +43,8 @@ shares the overall limits and may itself be partial. A later measurement failure
 retains completed journal checks but disables every review candidate. Unverified
 or missing journals never report a resolved reference scope. Literal deep paths
 are resolved against the subsequent traversal, not the shallow discovery pass.
+If the deadline prevents completion of reference resolution, reference scope stays
+unresolved even when journal verification finished successfully.
 Deferred directories are checked again before traversal, and history/directory
 change checks still run after an entry-budget failure while time remains.
 

@@ -19,6 +19,11 @@ project execution, credentials, providers or symlink traversal.
 - **AND** immediate ownership markers protect every discovered workspace while all review candidates remain disabled
 - **AND** missing or unverified journals report unresolved reference scope
 
+#### Scenario: Measurement timeout precedes reference resolution
+- **WHEN** journals verify but the deadline prevents completion of the deferred reference checks
+- **THEN** verified event counts are retained while reference scope remains unresolved
+- **AND** coverage stays partial and no review candidates are exposed
+
 #### Scenario: Explicit larger entry budget
 - **WHEN** a caller selects an entry budget above one million and no greater than ten million
 - **THEN** the API and CLI accept it while preserving the default budget and overall timeout maximum
