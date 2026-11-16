@@ -143,6 +143,8 @@ partial scans never produce review candidates and neither authorizes deletion.
 See [storage measurements and preview limits](docs/release-storage.md). Installation,
 runner/toolchain cleanup, actual garbage collection and cache invalidation remain
 separate work; a workspace can contain evidence or inputs still needed by recovery.
+The [storage specification](openspec/specs/release-storage/spec.md) owns the
+implemented observation and preview contracts.
 
 ## Google Play keyless authentication
 

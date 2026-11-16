@@ -54,5 +54,13 @@ credentials and operational observations stay private.
 Source/package acceptance and private read acceptance are separate. First test two
 synthetic consumer layouts, reference/corruption/concurrency and no-write boundaries.
 Inspect available private roots only after source checks; an imported metadata-only
-root does not establish the old machine's actual workspace size or rollout. Keep
-this change active until its required delivery/acceptance tasks are complete.
+root does not establish the old machine's actual workspace size or rollout.
+The completed read-only acceptance now also includes an authorized operator-supplied
+original-state/workspace report. Its reported traversal finished within the declared
+budgets without filesystem or change errors, and its journal counts and journal-less
+directory set matched the independently validated metadata sample. Conservative
+partial-history protection and the non-executable preview were verified. Operational
+records remain private; saved JSON is not authenticated live state or independent
+proof of original journal byte identity. This closes only bounded read acceptance,
+not exclusive-maintenance clearance, controller adoption, recovery, cleanup or any
+claim of actual reclaimable bytes.

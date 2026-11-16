@@ -112,6 +112,11 @@ intents must not be invalidated into a duplicate side effect.
 Saved/replayed JSON is not authenticated evidence. `applySupported` and
 `deletionAuthorized` are false. There is no retention timer, cache deletion,
 artifact deduplication, journal compaction or installed-controller upgrade.
-[The active OpenSpec change](../openspec/changes/add-read-only-storage-inventory/)
-owns first-slice acceptance. Synthetic consumers establish behavior and packaging,
-not acceptance of an old machine's real state or its reported disk footprint.
+[The implemented storage specification](../openspec/specs/release-storage/spec.md)
+owns the observation and preview contracts. Synthetic consumers establish behavior
+and packaging. Private authorized acceptance additionally compared an operator-supplied
+original-workspace report with independently validated metadata: traversal finished
+within budgets and known journal-less history retained partial coverage with no
+review candidates. This accepts the bounded read, not authenticated live state,
+whole-machine storage, controller adoption, recovery or cleanup readiness. Exact
+measurements and operational records remain private.
