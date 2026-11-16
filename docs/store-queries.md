@@ -105,3 +105,30 @@ retain incomplete assessments when expected build identity is unknown; successfu
 reads do not certify full release readiness. Installed managed-controller rollout
 remains a separate deferred operation; a standalone query-client install does not
 perform that upgrade.
+
+## Independent execution and publication conflicts
+
+Another machine may provision the same reviewed CLI and project adapter for new
+release work with its own private configuration, credentials and execution state.
+Historical journal migration is needed only for explicitly continuing or recovering
+an old task; it is not a prerequisite for querying a store or building a new package.
+An independent fresh executor must still inspect the current provider version,
+build selection and publication/review state before its existing write boundary.
+
+For iOS publication, ambiguous exact versions and editable drafts selecting a
+different Apple build stop execution before Fastlane. A recorded upload build ID
+must match subsequent observations; matching version/build numbers alone cannot
+replace that binding. A draft with no selected build remains eligible for the
+owned candidate. The existing explicitly handled correction of an older rejected
+build remains available; this does not authorize replacing another editable draft.
+Already-existing remote binaries without the task's upload journal are not adopted
+as the current artifact. Standalone `store-status` remains available for their
+version/build observations without claiming local artifact ownership.
+
+Existing upload/review/commit uncertainty remains reconciliation-only. Provider
+conflicts or invalidated Play edits do not authorize blind retries, replacement
+edits or overriding another selection. The Play path retains its hash-bound bundle
+checks and the specific provider-confirmed, uncommitted review-conflict retry rule.
+These are optimistic observations and explicit failure handling, not atomic
+cross-machine exclusion or automatic task takeover. Existing machine-local locks
+still protect local invocation; saved journals retain operation identity.

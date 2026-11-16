@@ -201,7 +201,19 @@ adoption. A reviewed package pin and managed control upgrade remain necessary.
 
 Local operation is the default. Optional GitHub scheduling supports one designated self-hosted Mac and its existing shared filesystem, using a pinned workflow and permanent request claims. It does not select paid hosted runners or perform cross-machine failover. Consumer repositories for this executor must remain private; this public tool repository does not run release jobs. The [workflow example](examples/.github/workflows/release-local.yml) is inert until explicitly installed and configured in a consumer.
 
-Each project needs its own private configuration, credential references and state directory. Retain the existing directory when adopting this package: journal/request formats and identities are unchanged by this extraction. Do not create a second publication ledger or reset history. This first version does not provide multi-project concurrent resource scheduling; serialize projects sharing devices, native tooling or store targets through the designated machine's existing coordination procedure.
+Each project needs its own private configuration, credential references and state
+directory. Retain an existing executor's state when adopting this package:
+journal/request formats and identities are unchanged by this extraction. Never
+reset or fork an existing task's publication history to retry an external operation.
+The optional same-Mac GitHub executor still targets its designated machine; projects
+sharing local devices or native tooling use that machine's coordination procedure.
+
+Provisioning another machine for fresh releases does not require importing the
+old machine's journals or workspaces. Each executor retains its own operation
+history. For independent submissions, provider version/build observations and
+conflict handling remain the admission checks; these reads are not a cross-machine
+lock or permission to adopt another executor's artifact. See
+[independent execution and publication conflicts](docs/store-queries.md#independent-execution-and-publication-conflicts).
 
 An installed control, its trusted project adapter and this exact dependency pin form one reviewed execution unit. Changing that unit while requests are unresolved is forbidden. Existing independent bootstrap copies must be upgraded through their own maintenance procedure; copying an npm re-export into a standalone bootstrap directory will not work. The standalone `src/coordination.mjs` has no package dependencies and may be installed as a checked byte-identical companion to a trusted bootstrap.
 

@@ -473,6 +473,7 @@ async function observeApple(ctx, cfg, token, { allowRejectedReplacement = false 
   )
     throw new StoreError('A newer App Store version supersedes this release. Replan explicitly.');
   const targets = versions.data.filter((v) => v.attributes.versionString === ctx.artifact.version);
+  if (targets.length > 1) throw new StoreError('Exact App Store version is ambiguous.');
   const target = targets[0];
   const selectedId = target?.relationships?.build?.data?.id;
   const selected = versions.included.find((b) => b.type === 'builds' && b.id === selectedId);
@@ -503,6 +504,9 @@ async function observeApple(ctx, cfg, token, { allowRejectedReplacement = false 
       ))
   )
     throw new StoreError('Remote App Store build identity does not match.');
+  const uploadBuildId = previous(ctx, 'ios-upload')?.buildId;
+  if (build && uploadBuildId !== undefined && build.id !== uploadBuildId)
+    throw new StoreError('Remote App Store build differs from the journaled upload build.');
   const appleState = target?.attributes?.appVersionState ?? target?.attributes?.appStoreState;
   const states = {
     WAITING_FOR_REVIEW: 'in-review',
@@ -531,7 +535,7 @@ async function observeApple(ctx, cfg, token, { allowRejectedReplacement = false 
     selected &&
     compareVersion(selected.attributes.version, String(ctx.artifact.buildNumber)) < 0;
   if (
-    states[appleState] &&
+    (states[appleState] || (appleState === 'PREPARE_FOR_SUBMISSION' && selectedId)) &&
     (!selectedId || !build?.id || selectedId !== build.id) &&
     !replacesRejectedBuild
   )
