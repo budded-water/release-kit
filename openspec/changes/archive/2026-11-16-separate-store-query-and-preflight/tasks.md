@@ -12,11 +12,11 @@
 - [x] Merge upstream with owner authorization.
 - [x] Pin the reviewed merged source in the consumer and verify its locked install and local release regressions.
 - [x] Verify consumer hosted checks and current-head independent review after applicable PR preflight.
-- [ ] Verify authorized read-only acceptance in a second real project using private evidence. Deferred: owner postponed credential setup; synthetic tests are not acceptance.
+- [x] Verify authorized read-only acceptance in a second real project using private evidence. Inventory, exact found/not-found status, sanitized preflight and pure replay were verified with independent app/key configuration; operational records remain private.
 
 ## 3. Finalization
-- [ ] Record installed-control adoption separately if requested. Deferred: source-only delivery does not upgrade installed control.
-- [ ] Promote implemented specs and archive only when acceptance scope is fulfilled.
+- [x] Record the installed-control boundary: adoption was not requested for this acceptance slice and remains a separate deferred rollout. The private query client does not upgrade the managed release controller.
+- [x] Promote implemented specs and archive after source, consumer and second-project read acceptance. No full release-readiness or installed-control acceptance is claimed.
 
 ## Evidence ownership
 
@@ -24,5 +24,9 @@ The source implementation and consumer integration are distinct delivery records
 Exact heads, hosted check results and reviews belong to their PR records; the
 consumer manifest/lockfile owns the adopted Git revision. Private provider reads,
 credentials, operational journals and installed-control evidence remain consumer-owned
-and are not copied into this public change. Source adoption does not satisfy the
-deferred real-project/provider or installed-control acceptance tasks above.
+and are not copied into this public change. The authorized second-project read gate
+is now satisfied by private evidence.
+This includes an exact absent source-candidate result and a separately selected
+existing-version assessment; it does not invent a new store version or establish
+source/build ownership. Both real-project assessments conservatively retain unknown
+build expectations. Installed-control rollout remains outside this completed slice.

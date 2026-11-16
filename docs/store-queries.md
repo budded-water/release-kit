@@ -95,8 +95,13 @@ Legacy artifact-owned `statusStore`, journal `status --remote`, passive `observe
 content preparation and publication are separate contracts and are not rewritten
 by this change. A read result never authorizes recovery/retry or adopts a remote build.
 
-The active OpenSpec change in the source repository owns proposed requirements and
-acceptance. Synthetic tests and npm/pnpm packed consumers establish code/installation
-behavior, not real account authorization. A second real project must independently
-verify its app/credential read. That private acceptance and installed-control rollout
-remain deferred while the owner postpones credential setup; do not mark them passed.
+The canonical [query](../openspec/specs/store-query/spec.md) and
+[preflight](../openspec/specs/store-preflight/spec.md) specs own the implemented
+requirements. Synthetic tests and npm/pnpm packed consumers establish code/installation
+behavior, not real account authorization. Authorized private acceptance has separately
+verified inventory, exact found/not-found status, sanitized preflight and pure replay
+in two real projects with independent app/key configurations. The private records
+retain incomplete assessments when expected build identity is unknown; successful
+reads do not certify full release readiness. Installed managed-controller rollout
+remains a separate deferred operation; a standalone query-client install does not
+perform that upgrade.
