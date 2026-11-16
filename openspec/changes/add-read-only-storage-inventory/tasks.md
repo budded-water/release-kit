@@ -6,8 +6,11 @@
 ## 2. Validation and delivery
 - [x] Verify two synthetic project layouts and reference/failure/no-write boundaries.
 - [x] Run required checks, strict specs and packed npm/pnpm consumers.
-- [ ] Deliver source through owner-authorized merge after hosted CI and current-head independent review (results owned by the PR record).
-- [ ] Record separate private real-journal acceptance. Deferred until original state arrives; local fixtures and metadata-only filesystem smoke do not satisfy it.
+- [ ] Complete private original-state/workspace read acceptance. Metadata-only real-journal reads and conservative partial results were recorded privately; they do not establish full old-machine/workspace coverage.
+
+Source delivery requires owner-authorized merge after hosted CI and current-head
+independent review. The PR is the canonical record of those gate outcomes and
+merge status; this checklist does not duplicate that mutable delivery state.
 
 ## 3. Follow-up boundary
 - [ ] Promote specs and archive after the required acceptance is fulfilled.
