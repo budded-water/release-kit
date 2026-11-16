@@ -11,6 +11,7 @@ listing facts through pure rules with a declared scope and version.
 #### Scenario: Assessment replay
 - **WHEN** the same collected facts and expectations are evaluated again
 - **THEN** the same checks result without network or persistence
+- **AND** sanitized failed-read diagnostics remain in facts so unknown evidence survives replay
 
 #### Scenario: Missing and unavailable evidence
 - **WHEN** a resource is confirmed absent or cannot be read

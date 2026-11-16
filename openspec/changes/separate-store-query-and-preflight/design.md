@@ -25,7 +25,7 @@ Reports include start/end times; multi-request reads are not atomic snapshots.
 ## Assessment
 
 Facts omit contact values/passwords, listing text and private URLs. Assessment uses
-booleans/counts and exact identity facts, needs no network and grants no approval.
+booleans/counts, exact identity facts and the sanitized read-diagnostic inventory, needs no network and grants no approval.
 Conclusions are blocked (confirmed missing), incomplete (unknown/attention), or
 clear-within-scope. Scope is submission metadata and candidate/build comparison,
 not complete submit readiness. Rules version is recorded. Product truthfulness,

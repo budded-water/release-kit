@@ -63,7 +63,7 @@ async function collectListingFacts(reader, query) {
 // Pure evaluation: callers may re-evaluate facts, but this function never
 // authenticates saved evidence or grants permission to publish.
 export function assessStorePreflight(facts, { expectedAppleBuildId } = {}) {
-  need(facts && typeof facts === 'object' && Array.isArray(facts.versions), 'Expected sanitized preflight facts');
+  need(facts && typeof facts === 'object' && Array.isArray(facts.versions) && Array.isArray(facts.errors), 'Expected sanitized preflight facts with read diagnostics');
   const checks = [];
   const check = (code, status, message, scope) => checks.push({ code, status, message, ...(scope ? { scope } : {}) });
   const presence = (code, value, message, scope) => check(code, value === null || value === undefined ? 'unknown' : value ? 'present' : 'missing', message, scope);
@@ -102,6 +102,7 @@ export function assessStorePreflight(facts, { expectedAppleBuildId } = {}) {
       }
     }
   }
+  for (const error of facts.errors) checks.push({ code: error.code, status: 'unknown', message: 'Provider read unavailable; absence must not be inferred.' });
   return checks;
 }
 
@@ -110,8 +111,8 @@ export async function inspectAppStore(options) {
   return withAppleRead(options, async reader => {
     const query = await queryAppleVersion(reader, options);
     const facts = await collectListingFacts(reader, query);
+    facts.errors = reader.errors.map(error => ({ ...error }));
     const checks = assessStorePreflight(facts, options);
-    for (const error of reader.errors) checks.push({ code: error.code, status: 'unknown', message: 'Provider read unavailable; absence must not be inferred.' });
     const counts = Object.fromEntries(['present', 'missing', 'unknown', 'attention'].map(status => [status, checks.filter(check => check.status === status).length]));
     return { kind: 'app-store-preflight-v1', operation: 'store-preflight', rulesVersion: 1,
       assessmentScope: 'iOS store submission metadata and explicit candidate/build matching; not full submission or public readiness.',

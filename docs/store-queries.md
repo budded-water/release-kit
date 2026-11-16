@@ -74,8 +74,9 @@ a particular review attempt, territory/device availability or a complete rollout
 Preflight collects only sanitized presence/syntax/count facts and records rules version,
 checks, counts, scope and blocked/incomplete/clear-within-scope conclusion. Confirmed
 missing facts take precedence over unknowns in the conclusion; both remain in checks.
-The pure assessor repeats checks without networking and does not authenticate saved
-facts. `publicReleaseReady` remains false. Metadata checks do not establish review
+The pure assessor requires sanitized read diagnostics inside facts, repeats the same
+checks for successful and failed reads without networking, and does not authenticate
+saved facts. Missing diagnostic inventories are rejected rather than treated as complete. `publicReleaseReady` remains false. Metadata checks do not establish review
 admission, truthful privacy/rights declarations, App Privacy publication, screenshot
 coverage, agreements, reviewer access or production device/service acceptance.
 

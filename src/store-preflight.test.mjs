@@ -221,3 +221,28 @@ test('pure assessment replays sanitized facts without I/O and preserves scoped c
   assert.match(report.assessmentScope, /not full/);
   assert.equal(f.calls.filter(path => path.startsWith('/v1/apps/123/appStoreVersions')).length, 1);
 });
+test('pure replay retains unknown diagnostics for failed provider reads at every collection stage', async () => {
+  const { assessStorePreflight } = await import('./store-preflight.mjs');
+  for (const path of [
+    '/v1/apps/123/appStoreVersions',
+    '/v1/appStoreVersions/version/build',
+    '/v1/appStoreVersions/version/appStoreReviewDetail',
+    '/v1/appStoreVersions/version/appStoreVersionLocalizations',
+    '/v1/appStoreVersionLocalizations/locale/appScreenshotSets',
+    '/v1/appScreenshotSets/set/appScreenshots',
+    '/v1/apps/123/appInfos',
+    '/v1/appInfos/info/primaryCategory',
+    '/v1/appInfos/info/appInfoLocalizations',
+  ]) {
+    const f = fixture();
+    f.rows[path] = Object.assign(new Error('PRIVATE_DIAGNOSTIC'), { status: 403 });
+    const report = await inspectStore({ ...f.options, expectedAppleBuildId: 'build' });
+    assert.equal(report.observationComplete, false);
+    assert.ok(report.facts.errors.length > 0);
+    const replay = assessStorePreflight(report.facts, { expectedAppleBuildId: 'build' });
+    assert.deepEqual(replay, report.checks);
+    assert.ok(replay.some(check => check.status === 'unknown'));
+    assert.ok(!JSON.stringify(report.facts).includes('PRIVATE_DIAGNOSTIC'));
+  }
+  assert.throws(() => assessStorePreflight({ versions: [], app: null }), /diagnostics/);
+});
