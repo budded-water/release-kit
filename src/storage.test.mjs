@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink, link, lstat, open } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink, link, lstat, open, opendir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inspectStorage, planStorageCleanup } from './storage.mjs';
@@ -62,6 +62,7 @@ test('all retained snapshots and other releases protect referenced workspace des
   const inventory=await inspectStorage({stateDirectory:store});
   assert.equal(inventory.observationComplete,true);
   assert.deepEqual(inventory.workspaces[0].referencedBy,[id('a'),id('b')]);
+  assert(inventory.releases.every(release=>release.referenceScopeResolved));
   assert(inventory.workspaces[0].protectionReasons.includes('retained-journal-reference'));
   assert.equal(planStorageCleanup(inventory).counts.reviewCandidates,0);
 });
@@ -134,8 +135,103 @@ test('missing roots and invalid CLI inputs do not create directories; cancellati
   const controller=new AbortController();controller.abort();
   await assert.rejects(inspectStorage({stateDirectory:store,signal:controller.signal}),{name:'AbortError'});
   let help;assert.equal(await main({args:['storage-inspect','--help'],output:s=>help=s}),0);assert.match(help,/no deletion/);
-  for (const extra of [['--apply'],['--publish'],['--config','/private/config'],['release-123'],['--max-entries','1000001'],['--timeout-seconds','301']])
+  for (const extra of [['--apply'],['--publish'],['--config','/private/config'],['release-123'],['--max-entries','10000001'],['--timeout-seconds','301']])
     await assert.rejects(main({args:['storage-plan','--state-dir',store,...extra],output:()=>{}}));
+});
+
+test('deep workspaces cannot starve other release journals or immediate ownership markers', async t => {
+  const {root,store}=await fixture(t),a=state('a'),b=state('b');
+  const workspace=join(releasePath(store,a.plan.id),'validation');
+  for(let i=0;i<80;i++) await file(join(workspace,`cache-${i}`),'cache');
+  b.evidenceRoot=join(workspace,'cache-79');
+  await saveState(releasePath(store,a.plan.id),a);
+  await saveState(releasePath(store,b.plan.id),b);
+  await file(join(releasePath(store,b.plan.id),'build-ios/output'),'build');
+  await file(join(store,'targets/owner.json'),'ownership');
+  const before=await tree(root);
+  const inventory=await inspectStorage({stateDirectory:store,maxEntries:30});
+  assert.equal(inventory.observationComplete,false);
+  assert(inventory.errors.some(e=>e.code==='entry-budget-exhausted'));
+  assert.equal(inventory.releases.length,2);
+  assert(inventory.releases.every(release=>release.verifiedEvents===1));
+  assert.equal(inventory.workspaces.length,2);
+  assert(inventory.workspaces.every(w=>w.protectionReasons.includes('inventory-incomplete')&&w.protectionReasons.includes('target-ownership-present')));
+  assert(inventory.workspaces.find(w=>w.kind==='validation').referencedBy.includes(b.plan.id));
+  assert.equal(planStorageCleanup(inventory).counts.reviewCandidates,0);
+  assert.deepEqual(await tree(root),before);
+});
+
+test('missing and corrupt journals stay unresolved even when a workspace exhausts measurement', async t => {
+  const {store}=await fixture(t),a=state('a'),b=state('b'),c=state('c');
+  await saveState(releasePath(store,a.plan.id),a);
+  await saveState(releasePath(store,b.plan.id),b);
+  await writeFile(join(releasePath(store,b.plan.id),'events/00000001.json'),'{}');
+  await file(join(releasePath(store,c.plan.id),'logs/old.log'),'log');
+  for(let i=0;i<80;i++) await file(join(releasePath(store,a.plan.id),'validation',`cache-${i}`),'cache');
+  const inventory=await inspectStorage({stateDirectory:store,maxEntries:30});
+  assert.equal(inventory.releases.find(r=>r.releaseId===a.plan.id).verifiedEvents,1);
+  for(const releaseId of [b.plan.id,c.plan.id]) {
+    const release=inventory.releases.find(r=>r.releaseId===releaseId);
+    assert.equal(release.verifiedEvents,0);
+    assert.equal(release.referenceScopeResolved,false);
+  }
+  for(const code of ['journal-invalid','journal-missing','entry-budget-exhausted']) assert(inventory.errors.some(e=>e.code===code));
+  assert.equal(planStorageCleanup(inventory).counts.reviewCandidates,0);
+});
+
+test('a workspace replaced by a symlink between journal and measurement phases is not traversed', async t => {
+  const {root,store}=await fixture(t),s=state('a'),dir=releasePath(store,s.plan.id);
+  await saveState(dir,s);
+  const workspace=join(dir,'validation');await file(join(workspace,'cache'),'cache');
+  const outside=join(root,'outside');await file(join(outside,'secret'),'synthetic external bytes');
+  const event=join(dir,'events/00000001.json');
+  const handle=await open(event,'r'),prototype=Object.getPrototypeOf(handle);await handle.close();
+  const read=prototype.read;let replaced=false;
+  t.mock.method(prototype,'read',async function(...args){
+    const result=await read.apply(this,args);
+    if(result.bytesRead&&!replaced){replaced=true;await rm(workspace,{recursive:true});await symlink(outside,workspace);}
+    return result;
+  });
+  const inventory=await inspectStorage({stateDirectory:store});
+  assert(replaced);assert.equal(inventory.observationComplete,false);
+  assert.equal(inventory.releases[0].verifiedEvents,1);
+  assert.equal(inventory.workspaces[0].apparentBytes,0);
+  assert(inventory.errors.some(e=>e.code==='directory-changed'&&e.path.endsWith('/validation')));
+  assert.equal(planStorageCleanup(inventory).counts.reviewCandidates,0);
+});
+
+test('larger explicit scans remain bounded through both the API and CLI', async t => {
+  const {store}=await fixture(t);await file(join(store,'small'),'123');
+  for(const maxEntries of [1000001,10000000]) {
+    assert.equal((await inspectStorage({stateDirectory:store,maxEntries})).observationComplete,true);
+    let report;
+    assert.equal(await main({args:['storage-inspect','--state-dir',store,'--max-entries',String(maxEntries)],output:s=>report=JSON.parse(s)}),0);
+    assert.equal(report.totals.apparentBytes,3);
+  }
+  await assert.rejects(inspectStorage({stateDirectory:store,maxEntries:10000001}),/entry budget/);
+});
+
+test('timeout during deferred measurement retains journal checks without claiming resolved deep references', async t => {
+  const {store}=await fixture(t),s=state('a'),dir=releasePath(store,s.plan.id);
+  const workspace=join(dir,'validation');await file(join(workspace,'cache'),'cache');
+  s.evidenceRoot=join(workspace,'missing-proof');await saveState(dir,s);
+  const handle=await opendir(workspace),prototype=Object.getPrototypeOf(handle);await handle.close();
+  const descriptor=Object.getOwnPropertyDescriptor(prototype,Symbol.asyncIterator);
+  const canonicalWorkspace=await realpath(workspace);let expired=false;
+  // Restore the descriptor directly: Node 22's mock restore corrupts this symbol method.
+  Object.defineProperty(prototype,Symbol.asyncIterator,{...descriptor,value:function(...args){
+    if(this.path===canonicalWorkspace) expired=true;
+    return descriptor.value.apply(this,args);
+  }});
+  t.mock.method(Date,'now',()=>expired?1000:0);
+  let inventory;
+  try { inventory=await inspectStorage({stateDirectory:store,timeoutMs:100}); }
+  finally { Object.defineProperty(prototype,Symbol.asyncIterator,descriptor); }
+  assert(expired);assert.equal(inventory.releases[0].verifiedEvents,1);
+  assert.equal(inventory.releases[0].referenceScopeResolved,false);
+  assert.equal(inventory.observationComplete,false);
+  assert(inventory.errors.some(e=>e.code==='timeout'));
+  assert.equal(planStorageCleanup(inventory).counts.reviewCandidates,0);
 });
 
 test('metadata contents stay private while unrecognized directories remain outside cleanup candidates', async t => {

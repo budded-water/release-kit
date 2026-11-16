@@ -16,6 +16,15 @@ paths are matched to candidate ancestors/descendants; possible relative paths an
 unresolved external paths conservatively block preview candidates. Metadata is
 checked again after reading; no lock or state directory is created.
 
+Shallow release/journal discovery and immediate ownership markers precede deep
+workspace measurement. Discovered journals are verified before deferred directory
+traversal, so a large workspace cannot starve other release histories. Deferred
+directories are checked again before traversal. Deep references are resolved after
+measurement; the report claims resolved scope only for verified journals after
+that resolution pass completes. An expired deadline cannot turn unfinished
+reference checks into clearance. Entry exhaustion retains completed journal checks
+and still permits change guards to run within the remaining time budget.
+
 ## Preview and failure
 Known validation/build/store-content source directories are inventoried as workspaces.
 Unrecognized directories remain unclassified. All historical snapshot references
@@ -35,7 +44,7 @@ nor replay authenticates evidence or authorizes deletion.
 ## CLI and packaging
 Both commands require `--state-dir`; neither accepts project/config/publish/apply
 options or a release ID. Default timeout is 120 seconds (CLI maximum 300), entry
-budget 100000 (maximum 1000000), record limit 8 MiB, total journal bytes 64 MiB.
+budget 100000 (maximum 10000000), record limit 8 MiB, total journal bytes 64 MiB.
 Exit 0 means observation complete, even with protected workspaces. Partial reads
 return 2; invalid input and cancellation fail. No automatic retry or report writes.
 The public package includes only synthetic fixtures and documentation. Real paths,

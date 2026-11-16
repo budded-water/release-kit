@@ -42,7 +42,7 @@ function unsettled(state) {
 // No mkdir, locks, project imports, subprocesses, network or arbitrary file reads.
 export async function inspectStorage({ stateDirectory, maxEntries, timeoutMs, signal } = {}) {
   if (typeof stateDirectory !== 'string' || !isAbsolute(stateDirectory)) throw new Error('Storage inspection requires an absolute state directory');
-  maxEntries = limit(maxEntries, 100000, 1000000, 'entry budget');
+  maxEntries = limit(maxEntries, 100000, 10000000, 'entry budget');
   timeoutMs = limit(timeoutMs, 120000, 300000, 'storage timeout');
   signal?.throwIfAborted();
   const startedAt = new Date().toISOString();
@@ -53,9 +53,12 @@ export async function inspectStorage({ stateDirectory, maxEntries, timeoutMs, si
   if (!rootStat.isDirectory()) throw new Error('Storage root must be an existing directory');
   const errors = [], groups = new Map(), workspaces = new Map(), releases = new Map();
   const metadata = new Map(), directoryStamps = new Map(), seen = new Set(), inodes = new Set();
+  const deferredDirectories = [];
   const references = new Map(), workspaceReferences = new Map(), referenceUnknown = new Set(), globalProtection = new Set();
   let visited = 0, apparentBytes = 0, allocatedBytes = 0, allocationKnown = true, symlinks = 0, hardLinkedFiles = 0;
   let metadataBytes = 0, objectNodes = 0, errorCount = 0;
+  let metadataPhase = true;
+  let referenceResolutionComplete = false;
   const fail = code => Object.assign(new Error(code), { storageCode: code });
   const check = () => {
     signal?.throwIfAborted();
@@ -80,7 +83,7 @@ export async function inspectStorage({ stateDirectory, maxEntries, timeoutMs, si
     const releaseId = parts[0] === 'releases' && RELEASE.test(parts[1] ?? '') ? parts[1] : undefined;
     if (parts[0] === 'releases' && parts.length === 2) {
       if (!releaseId || !st.isDirectory() || st.isSymbolicLink()) error('unrecognized-release', rel);
-      else releases.set(releaseId, { id: releaseId, path: rel, events: [], current: null, verifiedEvents: 0, reasons: new Set() });
+      else releases.set(releaseId, { id: releaseId, path: rel, events: [], current: null, verifiedEvents: 0, journalVerified: false, reasons: new Set() });
     }
     if (releaseId && parts.length === 3 && WORKSPACE.test(parts[2]) && st.isDirectory() && !st.isSymbolicLink()) {
       workspaces.set(rel, { path: rel, releaseId, kind: parts[2] === 'validation' ? 'validation' : parts[2] === 'store-content-source' ? 'store-content-source' : 'build',
@@ -121,6 +124,20 @@ export async function inspectStorage({ stateDirectory, maxEntries, timeoutMs, si
     if (releaseId && parts[2] === 'events' && parts.length > 3) error('unrecognized-journal-entry', rel);
     group.directories++;
     if (!rel || parts[0] === 'releases' && parts.length <= 3) directoryStamps.set(rel, stamp(st));
+    // Discover every release journal and immediate ownership marker before deep
+    // workspaces can consume the shared entry/time budgets. Count each path once.
+    const metadataDirectory = !rel || parts[0] === 'releases' && parts.length === 1 ||
+      releaseId && (parts.length === 2 || parts.length === 3 && parts[2] === 'events') ||
+      parts.length === 1 && ['locks', 'dispatch', 'targets'].includes(parts[0]);
+    if (metadataPhase && !metadataDirectory) {
+      deferredDirectories.push({ path, depth, stamp: stamp(st) });
+      return;
+    }
+    await visitChildren(path, depth);
+  }
+  async function visitChildren(path, depth) {
+    check();
+    const rel = relative(root, path);
     let handle;
     try { handle = await opendir(path); } catch { error('filesystem-unreadable', rel); return; }
     try {
@@ -156,7 +173,6 @@ export async function inspectStorage({ stateDirectory, maxEntries, timeoutMs, si
               if (!workspaceReferences.has(workspace)) workspaceReferences.set(workspace, new Set());
               workspaceReferences.get(workspace).add(releaseId);
             }
-            if (!seen.has(rel)) referenceUnknown.add(releaseId);
           } else referenceUnknown.add(releaseId);
         } else if (pathKey(key) && item && !/^[a-z][a-z0-9+.-]*:\/\//i.test(item)) referenceUnknown.add(releaseId);
       } else if (item && typeof item === 'object') {
@@ -206,12 +222,37 @@ export async function inspectStorage({ stateDirectory, maxEntries, timeoutMs, si
           await collectReferences(state, release.id);
           release.current = state; previous = verified.digest; release.verifiedEvents++;
         }
+        release.journalVerified = true;
         if (unsettled(release.current)) release.reasons.add('release-operations-unsettled-or-unrecognized');
       } catch (e) {
         if (signal?.aborted || e.storageCode === 'timeout') throw e;
         error(e.storageCode ?? 'journal-invalid', release.path);
       }
     }
+    metadataPhase = false;
+    for (const directory of deferredDirectories) {
+      check();
+      let st;
+      try { st = await lstat(directory.path); }
+      catch { error('filesystem-unreadable', relative(root, directory.path)); continue; }
+      if (!st.isDirectory() || stamp(st) !== directory.stamp) {
+        error('directory-changed', relative(root, directory.path));
+        continue;
+      }
+      await visitChildren(directory.path, directory.depth);
+    }
+  } catch (e) {
+    signal?.throwIfAborted();
+    error(e.storageCode ?? 'storage-read-unavailable');
+  }
+  try {
+    // Deep references are resolved only after measurement, including a partial
+    // traversal. An unobserved path never becomes a proven absence or clearance.
+    for (const [rel, owners] of references) {
+      check();
+      if (!seen.has(rel)) for (const owner of owners) referenceUnknown.add(owner);
+    }
+    referenceResolutionComplete = true;
     // Guard histories and selected directory inventories against ordinary concurrent writes.
     for (const [rel, expected] of directoryStamps) {
       check();
@@ -235,7 +276,7 @@ export async function inspectStorage({ stateDirectory, maxEntries, timeoutMs, si
       check();
       const reasons = new Set(globalProtection);
       if (workspace.symlinks) reasons.add('contains-opaque-symlinks');
-      if (referenceUnknown.size) reasons.add('journal-reference-scope-unresolved');
+      if (!referenceResolutionComplete || referenceUnknown.size) reasons.add('journal-reference-scope-unresolved');
       for (const reason of releases.get(workspace.releaseId)?.reasons ?? []) reasons.add(reason);
       const referencedBy = new Set(workspaceReferences.get(workspace.path));
       const parts = workspace.path.split(sep);
@@ -264,7 +305,7 @@ export async function inspectStorage({ stateDirectory, maxEntries, timeoutMs, si
     totals: { visitedEntries: Math.min(visited, maxEntries), apparentBytes, observedUniqueAllocatedBytes: allocationKnown ? allocatedBytes : null, symlinks, hardLinkedFiles },
     groups: [...groups.values()].sort((a, b) => a.path.localeCompare(b.path)),
     releases: [...releases.values()].map(release => ({ releaseId: release.id, verifiedEvents: release.verifiedEvents,
-      referenceScopeResolved: !referenceUnknown.has(release.id), protectionReasons: [...release.reasons].sort() })),
+      referenceScopeResolved: release.journalVerified && referenceResolutionComplete && !referenceUnknown.has(release.id), protectionReasons: [...release.reasons].sort() })),
     workspaces: workspaceReports, errors, errorsTruncated: errorCount > errors.length, reclaimableBytes: null, deletionAuthorized: false };
   signal?.throwIfAborted();
   if (Date.now() >= deadline && report.observationComplete) {

@@ -9,7 +9,7 @@ export async function storageMain({ args, signal, output = console.log } = {}) {
   const operation = positionals[0];
   if (!['storage-inspect', 'storage-plan'].includes(operation) || positionals.length !== 1) throw new Error('Expected one storage read operation; no release ID');
   if (values.help) {
-    output(`${operation} --state-dir <existing-absolute-directory> [--max-entries <1–1000000>] [--timeout-seconds <1–300>]\nRead-only inventory/cleanup preview; no deletion, apply, project or provider operations.`);
+    output(`${operation} --state-dir <existing-absolute-directory> [--max-entries <1–10000000>] [--timeout-seconds <1–300>]\nRead-only inventory/cleanup preview; no deletion, apply, project or provider operations.`);
     return 0;
   }
   if (!values['state-dir'] || !/^[1-9]\d*$/.test(values['max-entries']) || !/^[1-9]\d*$/.test(values['timeout-seconds'])) throw new Error('Storage reads require --state-dir and positive integer budgets');

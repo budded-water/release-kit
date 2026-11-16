@@ -13,6 +13,26 @@ project execution, credentials, providers or symlink traversal.
 - **WHEN** entry/time/read budgets are exhausted or a path cannot be read
 - **THEN** the report declares partial coverage and exposes no review candidates
 
+#### Scenario: Large workspaces do not starve journal observation
+- **WHEN** shallow release metadata is within the declared budgets but deep workspace measurement exhausts them
+- **THEN** journal checks for all discovered releases precede deep measurement and their verified event counts remain in the partial report
+- **AND** immediate ownership markers protect every discovered workspace while all review candidates remain disabled
+- **AND** missing or unverified journals report unresolved reference scope
+
+#### Scenario: Measurement timeout precedes reference resolution
+- **WHEN** journals verify but the deadline prevents completion of the deferred reference checks
+- **THEN** verified event counts are retained while reference scope remains unresolved
+- **AND** coverage stays partial and no review candidates are exposed
+
+#### Scenario: Explicit larger entry budget
+- **WHEN** a caller selects an entry budget above one million and no greater than ten million
+- **THEN** the API and CLI accept it while preserving the default budget and overall timeout maximum
+- **AND** exhaustion still produces partial coverage without cleanup authority
+
+#### Scenario: Deferred workspace changes
+- **WHEN** a workspace directory changes or becomes a symlink after shallow discovery and before measurement
+- **THEN** its deferred traversal is skipped with an incomplete observation and no review candidates
+
 #### Scenario: Cancellation
 - **WHEN** the caller cancels
 - **THEN** the operation fails without a late successful report or state writes
