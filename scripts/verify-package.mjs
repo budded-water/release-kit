@@ -49,6 +49,11 @@ try {
     import assert from 'node:assert/strict';
     import { fileURLToPath } from 'node:url';
     import { main } from '@budded-water/release-kit/cli';
+    import { inspectAppStore } from '@budded-water/release-kit/store-preflight';
+    assert.equal(typeof inspectAppStore, 'function');
+    let preflightHelp;
+    assert.equal(await main({args:['store-preflight','--help'],output:s=>preflightHelp=s}),0);
+    assert.match(preflightHelp,/GET-only iOS/);
     import { saveState, releasePath } from '@budded-water/release-kit/state';
     import { createRunner } from '@budded-water/release-kit/engine';
     import { storeHandoff, inspectPrivacyAssociation } from '@budded-water/release-kit/operator-store';
