@@ -67,7 +67,9 @@ no credential values, contact data or other raw journal contents enter the repor
 
 Common stage, TestFlight operation, outcome and checkpoint fields are checked for
 unsettled or unrecognized execution. Any state lock/cleanup marker protects all
-workspaces. Dispatch history and target ownership are deliberately not declared
+workspaces. A symlink or invalid file at a reserved locks/dispatch/targets root
+makes observation incomplete without reading the target. Dispatch history and target
+ownership are deliberately not declared
 settled by this first reader: their presence requires reconciliation and protects
 all workspaces, even if a separate trusted operator can prove them settled.
 Opaque workspace symlinks also protect their containing workspace. Unknown/corrupt

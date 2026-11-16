@@ -235,3 +235,28 @@ test('unsupported nested state shapes and stale availability never clear unknown
   assert(inventory.workspaces[0].protectionReasons.includes('release-operations-unsettled-or-unrecognized'));
   assert.equal(planStorageCleanup(inventory).counts.reviewCandidates,0);
 });
+
+test('redirected, dangling or invalid ownership roots cannot hide coordination state or expose target bytes', async t => {
+  for (const name of ['locks','dispatch','targets']) {
+    for (const variant of ['directory-link','dangling-link','regular-file']) {
+      const {root,store}=await fixture(t);const s=state('a'),dir=releasePath(store,s.plan.id);
+      await saveState(dir,s);await file(join(dir,'validation/cache'),'cache');
+      const baseline=await inspectStorage({stateDirectory:store});
+      assert.equal(planStorageCleanup(baseline).counts.reviewCandidates,1);
+      const marker=join(store,name);
+      if(variant==='regular-file') await writeFile(marker,'invalid root');
+      else {
+        const target=join(root,'external-ownership');
+        if(variant==='directory-link') await file(join(target,'must-not-be-traversed'),'synthetic external ownership payload');
+        await symlink(target,marker);
+      }
+      const before=await tree(root),inventory=await inspectStorage({stateDirectory:store});
+      assert.equal(inventory.observationComplete,false,`${name}/${variant}`);
+      assert(inventory.errors.some(error=>error.code==='ownership-root-unavailable'&&error.path===name));
+      assert.equal(planStorageCleanup(inventory).counts.reviewCandidates,0);
+      assert(inventory.workspaces[0].protectionReasons.includes('ownership-root-unavailable'));
+      assert.equal(inventory.totals.apparentBytes,baseline.totals.apparentBytes+(variant==='regular-file' ? Buffer.byteLength('invalid root') : 0));
+      assert.deepEqual(await tree(root),before);
+    }
+  }
+});

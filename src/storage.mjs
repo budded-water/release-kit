@@ -87,6 +87,10 @@ export async function inspectStorage({ stateDirectory, maxEntries, timeoutMs, si
         apparentBytes: 0, files: 0, symlinks: 0 });
     }
     const workspace = releaseId && parts.length >= 3 ? workspaces.get(parts.slice(0, 3).join(sep)) : undefined;
+    if (parts.length === 1 && ['locks', 'dispatch', 'targets'].includes(parts[0]) && !st.isDirectory()) {
+      globalProtection.add('ownership-root-unavailable');
+      error('ownership-root-unavailable', rel);
+    }
     if (parts[0] === 'locks' && parts.length > 1) globalProtection.add('lock-or-cleanup-ownership-present');
     if (parts[0] === 'dispatch' && parts.length > 1) globalProtection.add('dispatch-reconciliation-not-assessed');
     if (parts[0] === 'targets' && parts.length > 1) globalProtection.add('target-ownership-present');
