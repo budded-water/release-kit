@@ -28,12 +28,27 @@ const preview = planStorageCleanup(inventory);
 ```
 
 The Node API requires an existing absolute directory. CLI budgets are
-`--max-entries` (1–1000000, default 100000) and `--timeout-seconds` (1–300,
+`--max-entries` (1–10000000, default 100000) and `--timeout-seconds` (1–300,
 default 120). API timeout uses milliseconds with the same maximum. Directory depth
 is bounded; journal reads additionally cap each record at 8 MiB, total event bytes
 at 64 MiB and parsed-reference complexity. The reader uses the same event-integrity
 rule as normal journal replay and checks event numbering. Schema-v1 journal bytes,
 IDs, stages, operation checkpoints and publication gates are unchanged.
+
+The observer first discovers release journals, workspace roots and immediate
+ownership markers, then verifies the discovered journals before measuring deep
+workspace contents. Thus a large workspace does not consume the entry budget
+before other releases' journals can be read. Metadata discovery/verification still
+shares the overall limits and may itself be partial. A later measurement failure
+retains completed journal checks but disables every review candidate. Unverified
+or missing journals never report a resolved reference scope. Literal deep paths
+are resolved against the subsequent traversal, not the shallow discovery pass.
+Deferred directories are checked again before traversal, and history/directory
+change checks still run after an entry-budget failure while time remains.
+
+For a large root, callers can explicitly raise `--max-entries` above one million;
+the default and five-minute timeout maximum remain unchanged. Exhausted limits
+still produce partial results, never a complete size or cleanup clearance.
 
 Directory entries are streamed and observed with lstat. Symlinks are counted but
 never intentionally traversed, and their target bytes are excluded. This is a

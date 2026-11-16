@@ -6,6 +6,7 @@
 ## 2. Validation and delivery
 - [x] Verify two synthetic project layouts and reference/failure/no-write boundaries.
 - [x] Run required checks, strict specs and packed npm/pnpm consumers.
+- [x] Verify metadata-first ordering, deferred-directory changes and explicit larger-budget regression cases.
 - [ ] Complete private original-state/workspace read acceptance. Metadata-only real-journal reads and conservative partial results were recorded privately; they do not establish full old-machine/workspace coverage.
 
 Source delivery requires owner-authorized merge after hosted CI and current-head
