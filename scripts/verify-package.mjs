@@ -64,6 +64,8 @@ try {
     assert.equal(await main({args:['store-preflight','--help'],output:s=>preflightHelp=s}),0);
     assert.match(preflightHelp,/GET-only iOS/);
     import { saveState, releasePath } from '@budded-water/release-kit/state';
+    import { inspectStorage, planStorageCleanup } from '@budded-water/release-kit/storage';
+    assert.equal(typeof inspectStorage, 'function'); assert.equal(typeof planStorageCleanup, 'function');
     import { createRunner } from '@budded-water/release-kit/engine';
     import { storeHandoff, inspectPrivacyAssociation } from '@budded-water/release-kit/operator-store';
     import { workerMain } from '@budded-water/release-kit/worker';
@@ -71,10 +73,15 @@ try {
     assert.doesNotThrow(() => assertWechatVersionObservation({appId:'wx1111111111111111',version:'1.0.0',source:'owner',observedAt:new Date().toISOString()},'wx1111111111111111','1.0.1'));
     const id = 'release-' + 'a'.repeat(24);
     const store = fileURLToPath(new URL('./state', import.meta.url));
-    await saveState(releasePath(store, id), { plan: { id, source: 'a'.repeat(40), platforms: ['ios'] }, stages: {}, outcomes: {} });
+    await saveState(releasePath(store, id), { schemaVersion: 1, plan: { id, source: 'a'.repeat(40), platforms: ['ios'] }, stages: {}, outcomes: {} });
     let result;
     assert.equal(await main({ args: ['status', id, '--state-dir', store, '--summary'], output: s => result = JSON.parse(s) }), 0);
     assert.equal(result.releaseId, id); assert.equal(result.summaryOnly, true);
+    const storage = await inspectStorage({stateDirectory:store});
+    assert.equal(storage.observationComplete,true); assert.equal(storage.releases[0].verifiedEvents,1);
+    assert.equal(planStorageCleanup(storage).deletionAuthorized,false);
+    assert.equal(await main({args:['storage-plan','--state-dir',store],output:s=>result=JSON.parse(s)}),0);
+    assert.equal(result.applySupported,false);
     assert.deepEqual((await storeHandoff({ store, id })).observations, []);
     assert.equal(inspectPrivacyAssociation({ listingAppName: 'Example', policyAppName: 'Example', policyId: 'p1', linkedPolicyId: 'p1', reviewState: 'approved' }).state, 'matched');
     assert.equal(typeof createRunner, 'function'); assert.equal(typeof workerMain, 'function');
