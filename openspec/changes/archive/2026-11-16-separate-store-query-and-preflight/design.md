@@ -61,5 +61,9 @@ Google track and Harmony version semantics require their own implementations and
 scenarios before being advertised. MCP, if needed, calls these services without a
 second interpretation. Synthetic npm/pnpm consumers test installation independence;
 a second real project with authorized credentials must validate reuse separately.
-Its evidence stays private. This acceptance remains pending while credentials are
-unavailable; do not relabel fixture success as live acceptance.
+Its evidence stays private. Authorized reads have now verified complete inventory,
+exact found/not-found status, sanitized preflight and pure replay in two real projects
+with separate app/key configurations. The absent source candidate was not replaced
+by another version; existing-version inspection was a separate explicit acceptance
+query. These reads do not attest source/build ownership or full release readiness.
+The private standalone query client is not an installed managed-controller upgrade.

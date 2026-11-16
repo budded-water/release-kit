@@ -125,10 +125,13 @@ preflight require an exact version and never fall back to a different draft.
 
 See [store reads and consumer integration](docs/store-queries.md) for configuration,
 Node APIs, result/exit semantics, scope, private credential references and limitations.
-The proposed behavior and acceptance scenarios are canonical in
-[the active OpenSpec change](openspec/changes/separate-store-query-and-preflight/).
+The implemented behavior and acceptance scenarios are canonical in
+[the query specification](openspec/specs/store-query/spec.md) and
+[the preflight specification](openspec/specs/store-preflight/spec.md).
 `pnpm run spec:check` validates structure; it is not semantic approval or live evidence.
-The change remains active while real second-consumer/installed acceptance is deferred.
+Authorized read-only reuse was verified in two real projects with private evidence.
+Installed managed-controller adoption remains separate and deferred; these reads do
+not certify full release readiness.
 Existing journal-bound status/observe and publication contracts remain unchanged.
 
 ## Google Play keyless authentication
