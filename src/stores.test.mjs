@@ -1143,6 +1143,81 @@ test('corrected iOS build can replace only an older editable rejected build at t
   }
 });
 
+test('an editable iOS draft selecting another build is a conflict, including an older build number', async (t) => {
+  for (const olderBuildNumber of ['41', '42']) {
+    const f = await fixture(t, 'ios');
+    f.checkpoint('ios-upload', { state: 'uploaded', buildId: build.id });
+    rejectedPredecessorProvider(f, 'PREPARE_FOR_SUBMISSION', { hasNewBuild: true, olderBuildNumber });
+    await assert.rejects(publishStore(f.ctx), /different build/);
+    assert.equal(f.commands.length, 0);
+    assert.equal(f.journal.length, 0);
+    const status = await statusStore(f.ctx);
+    assert.equal(status.state, 'unavailable');
+    assert.match(status.message, /different build/);
+    assert(f.calls.every(({ opts }) => !opts.method || opts.method === 'GET'));
+  }
+});
+
+test('an iOS draft without a selected build still permits submission of the journal-owned build', async (t) => {
+  const f = await fixture(t, 'ios');
+  f.checkpoint('ios-upload', { state: 'uploaded', buildId: build.id });
+  const draft = appVersion('PREPARE_FOR_SUBMISSION');
+  draft.relationships.build.data = null;
+  appleProvider(f, { versions: [draft] });
+  assert.equal((await publishStore(f.ctx)).state, 'submitted');
+  assert.equal(f.commands.length, 1);
+  assert.equal(f.commands[0].args[0], 'deliver');
+});
+
+test('ambiguous exact iOS versions never choose the first version for publication', async (t) => {
+  const f = await fixture(t, 'ios');
+  f.checkpoint('ios-upload', { state: 'uploaded', buildId: build.id });
+  const draft = appVersion('PREPARE_FOR_SUBMISSION');
+  appleProvider(f, { versions: [draft, { ...draft, id: 'another-version' }] });
+  await assert.rejects(publishStore(f.ctx), /ambiguous/);
+  assert.equal((await statusStore(f.ctx)).state, 'unavailable');
+  assert.equal(f.commands.length, 0);
+  assert.equal(f.journal.length, 0);
+  assert(f.calls.every(({ opts }) => !opts.method || opts.method === 'GET'));
+});
+
+test('iOS remote build ID must retain the journaled upload binding', async (t) => {
+  const f = await fixture(t, 'ios');
+  f.checkpoint('ios-upload', { state: 'uploaded', buildId: 'original-build' });
+  const before = structuredClone(f.ctx.previous);
+  appleProvider(f, { versions: [appVersion('PREPARE_FOR_SUBMISSION')] });
+  await assert.rejects(publishStore(f.ctx), /upload.*build|build.*upload/);
+  const status = await statusStore(f.ctx);
+  assert.equal(status.state, 'unavailable');
+  assert.equal(f.commands.length, 0);
+  assert.equal(f.journal.length, 0);
+  assert.deepEqual(f.ctx.previous, before);
+});
+
+test('an iOS draft changed during listing preflight stops before review intent or Fastlane', async (t) => {
+  const f = await fixture(t, 'ios');
+  f.checkpoint('ios-upload', { state: 'uploaded', buildId: build.id });
+  const draft = appVersion('PREPARE_FOR_SUBMISSION');
+  draft.relationships.build.data = null;
+  appleProvider(f, { versions: [draft] });
+  const provider = f.ctx.fetch;let observations = 0;
+  f.ctx.fetch = (url, opts) => {
+    if (url.includes('/appStoreVersions?') && url.includes('include=build') && ++observations > 1) {
+      f.calls.push({ url, opts });
+      const changed = appVersion('PREPARE_FOR_SUBMISSION');
+      changed.relationships.build.data.id = 'other-build';
+      return ok({ data: [changed],
+        included: [{ ...build, id: 'other-build', attributes: { ...build.attributes, version: '41' } }] });
+    }
+    return provider(url, opts);
+  };
+  await assert.rejects(publishStore(f.ctx), /different build/);
+  assert(observations >= 2);
+  assert.equal(f.commands.length, 0);
+  assert.equal(f.ctx.previous['ios-review'], undefined);
+  assert(f.calls.every(({ opts }) => !opts.method || opts.method === 'GET'));
+});
+
 test('read-only iOS status never attributes predecessor rejection to the intended successor', async (t) => {
   const f = await fixture(t, 'ios');
   f.checkpoint('ios-upload', { state: 'uploaded', buildId: build.id });
