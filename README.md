@@ -110,6 +110,27 @@ execution progress, not store availability. `pending-review`, `pending-release`,
 Adapters must use these explicit outcomes. Polling uses the same classification
 but succeeds only when all selected platforms have verified availability.
 
+## Standalone iOS store reads and preflight
+
+```sh
+pnpm exec release-kit store-versions --config /absolute/private/store.json
+pnpm exec release-kit store-status --config /absolute/private/store.json --version 1.0.0
+pnpm exec release-kit store-preflight --config /absolute/private/store.json --version 1.0.0 --build-id <expected-apple-build>
+```
+
+These ASC/IOS commands need no project module, Expo files, release journal or build.
+Inventory lists versions; status reads only app/version/selected-build facts;
+preflight adds sanitized listing collection and pure metadata checks. Status and
+preflight require an exact version and never fall back to a different draft.
+
+See [store reads and consumer integration](docs/store-queries.md) for configuration,
+Node APIs, result/exit semantics, scope, private credential references and limitations.
+The proposed behavior and acceptance scenarios are canonical in
+[the active OpenSpec change](openspec/changes/separate-store-query-and-preflight/).
+`pnpm run spec:check` validates structure; it is not semantic approval or live evidence.
+The change remains active while real second-consumer/installed acceptance is deferred.
+Existing journal-bound status/observe and publication contracts remain unchanged.
+
 ## Google Play keyless authentication
 
 The existing `stores.android.serviceAccountPathEnv` JSON-key mode remains supported.

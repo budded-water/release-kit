@@ -1,0 +1,6 @@
+schema: spec-driven
+context: |
+  Local-first, project-independent mobile release tooling. Read AGENTS.md.
+  Proposals describe intended behavior, not installed-control or live provider acceptance.
+  Provider credentials, account configuration and operational evidence stay private.
+  Existing journal identities, publication gates and recovery semantics are preserved.

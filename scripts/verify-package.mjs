@@ -49,6 +49,20 @@ try {
     import assert from 'node:assert/strict';
     import { fileURLToPath } from 'node:url';
     import { main } from '@budded-water/release-kit/cli';
+    import { inspectAppStore, assessStorePreflight } from '@budded-water/release-kit/store-preflight';
+    import { listStoreVersions, getStoreVersion } from '@budded-water/release-kit/store-query';
+    assert.equal(typeof listStoreVersions, 'function');
+    assert.equal(typeof getStoreVersion, 'function');
+    assert.equal(typeof assessStorePreflight, 'function');
+    const query = await getStoreVersion({appId:'123',bundleId:'test.example',apiKeyPathEnv:'EXAMPLE_KEY',candidateVersion:'1.0.0',
+      session:async()=>({read:async path=>path.startsWith('/v1/apps/')?{data:{id:'123',type:'apps',attributes:{bundleId:'test.example'}}}:{data:null},
+      list:async()=>[{id:'v1',type:'appStoreVersions',attributes:{platform:'IOS',versionString:'1.0.0',appVersionState:'IN_REVIEW'}}]})});
+    assert.equal(query.resolution,'found'); assert.equal(query.version.reviewState,'in-review');
+    assert.equal(query.observationComplete,true);
+    assert.equal(typeof inspectAppStore, 'function');
+    let preflightHelp;
+    assert.equal(await main({args:['store-preflight','--help'],output:s=>preflightHelp=s}),0);
+    assert.match(preflightHelp,/GET-only iOS/);
     import { saveState, releasePath } from '@budded-water/release-kit/state';
     import { createRunner } from '@budded-water/release-kit/engine';
     import { storeHandoff, inspectPrivacyAssociation } from '@budded-water/release-kit/operator-store';
