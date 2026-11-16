@@ -1,4 +1,4 @@
-import { storePreflightMain } from './store-preflight-cli.mjs';
+import { storeReadMain } from './store-read-cli.mjs';
 import { fileURLToPath } from 'node:url';
 import { resolve, join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -28,7 +28,9 @@ const defaultRoot = process.cwd();
 const help = `Release CLI (one designated Mac and state store)
 
 doctor --config <private.json> [--platforms ios,android,harmony] [--publish]
-store-preflight --config <private.json> [--version <candidate>] [--build-id <expected-apple-build>]
+store-versions --config <private.json>
+store-status --config <private.json> --version <candidate> [--build-id <expected-apple-build>]
+store-preflight --config <private.json> --version <candidate> [--build-id <expected-apple-build>]
 provider-inspect --config <private.json> [--platforms ios,android,harmony]
 store-plan --config <private.json> --ref <commit> --platforms ios|android
 store-apply <release-id> --config <private.json> --approve <content-plan-digest>
@@ -89,7 +91,7 @@ export async function main({
   output = console.log,
 } = {}) {
   if (signal?.aborted) return 130;
-  if (args[0] === 'store-preflight') return storePreflightMain({ args, environment, signal, output });
+  if (['store-versions', 'store-status', 'store-preflight'].includes(args[0])) return storeReadMain({ args, environment, signal, output });
   if (args[0] === 'wechat') return wechatMain({ args: args.slice(1), repo, project: wechatProject, command: executeCommand, signal, output });
   const { values, positionals } = parseArgs({
     args,

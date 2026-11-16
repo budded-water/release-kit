@@ -24,12 +24,17 @@
     "!src/*.test.mjs",
     "bin",
     "docs/wechat-uploads.md",
+    "docs/store-queries.md",
     "README.md",
     "SECURITY.md"
   ],
   "scripts": {
     "test": "node --test src/*.test.mjs test/*.test.mjs",
-    "check": "node scripts/check-boundaries.mjs && pnpm test",
-    "verify:package": "node scripts/verify-package.mjs pnpm && node scripts/verify-package.mjs npm"
+    "check": "node scripts/check-boundaries.mjs && pnpm run spec:check && pnpm test",
+    "verify:package": "node scripts/verify-package.mjs pnpm && node scripts/verify-package.mjs npm",
+    "spec:check": "openspec validate --all --strict --no-interactive"
+  },
+  "devDependencies": {
+    "@fission-ai/openspec": "1.16.0"
   }
 }

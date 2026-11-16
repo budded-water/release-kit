@@ -110,45 +110,26 @@ execution progress, not store availability. `pending-review`, `pending-release`,
 Adapters must use these explicit outcomes. Polling uses the same classification
 but succeeds only when all selected platforms have verified availability.
 
-## Standalone iOS store preflight
+## Standalone iOS store reads and preflight
 
 ```sh
-pnpm exec release-kit store-preflight --config /absolute/private/store.json
+pnpm exec release-kit store-versions --config /absolute/private/store.json
+pnpm exec release-kit store-status --config /absolute/private/store.json --version 1.0.0
 pnpm exec release-kit store-preflight --config /absolute/private/store.json --version 1.0.0 --build-id <expected-apple-build>
 ```
 
-This GET-only command requires no project module, Expo files, release journal or
-build. The private schema-v1 JSON supplies `stores.ios.appId` (numeric string),
-`bundleId` and `apiKeyPathEnv`; the named environment variable points to the
-existing private ASC team API key JSON (`key_id`, `issuer_id`, `key`). It uses the
-same authentication/session as other store helpers. Never commit credentials.
+These ASC/IOS commands need no project module, Expo files, release journal or build.
+Inventory lists versions; status reads only app/version/selected-build facts;
+preflight adds sanitized listing collection and pure metadata checks. Status and
+preflight require an exact version and never fall back to a different draft.
 
-The structured schema-v1 `app-store-preflight-v1` report includes version states,
-selected build identity, release type, and presence checks for contact fields,
-localizations, processed screenshots, category and privacy URLs. Private contact
-values, review credentials and listing content are omitted. Optional `--version`
-checks the exact candidate; a lone different version may be inspected for
-remediation, with `selectedVersionMatchesCandidate: false`. Without a candidate,
-a lone version is inspected; multiple versions remain an inventory with unknown
-version details. No draft is created or selected on the server.
-
-`present`, `missing`, `unknown` and `attention` describe observations, not launch
-approval. Exit 0 means reads completed (missing fields may remain); unavailable
-reads return 2. Identity mismatch or cancellation fails. Automatic/scheduled
-release is an attention item. `publicReleaseReady` is always false: truthful
-privacy declarations, agreements, screenshot coverage, reviewer access and actual
-production acceptance require separate evidence. This is separate from the
-artifact-bound publication gate in `apple-readiness`.
-
-Requests refuse redirects and non-ASC/non-GET operations, with a 200-request budget
-and `--timeout-seconds` from 1 to 300 (default 120). JSON goes to stdout; no state
-is persisted. The API is `inspectAppStore` from
-`@budded-water/release-kit/store-preflight`, accepting `appId`, `bundleId`,
-`apiKeyPathEnv`, optional `candidateVersion`, `expectedAppleBuildId`, `environment`
-and `signal`. API consumers own the overall cancellation deadline. App adapters
-own product acceptance checks and any source/profile-bound journal persistence.
-No MCP server, Google Play changes, upload, review submission or release writes
-are added by this command.
+See [store reads and consumer integration](docs/store-queries.md) for configuration,
+Node APIs, result/exit semantics, scope, private credential references and limitations.
+The proposed behavior and acceptance scenarios are canonical in
+[the active OpenSpec change](openspec/changes/separate-store-query-and-preflight/).
+`pnpm run spec:check` validates structure; it is not semantic approval or live evidence.
+The change remains active while real second-consumer/installed acceptance is deferred.
+Existing journal-bound status/observe and publication contracts remain unchanged.
 
 ## Google Play keyless authentication
 

@@ -10,7 +10,7 @@ const inspectStore = ({ plan, config, ...options }) => inspectAppStore({ ...opti
 const plan = { id: `release-${'a'.repeat(24)}`, source: 'a'.repeat(40), buildProfile: 'production',
   environment: 'production', ascAppId: '123', appIds: { ios: 'test.example' }, version: '1.0.0' };
 const config = { apiKeyPathEnv: 'EXAMPLE_ASC_API_KEY_PATH' };
-const resource = (id, attributes = {}, type = 'test') => ({ id, type, attributes });
+const resource = (id, attributes = {}, type = attributes.platform === 'IOS' ? 'appStoreVersions' : id === 'build' ? 'builds' : 'test') => ({ id, type, attributes });
 const data = value => ({ data: value });
 function fixture() {
   const rows = {
@@ -47,12 +47,13 @@ test('filled fields are observed, never public readiness or privacy/device accep
   assert.equal(r.kind, 'app-store-preflight-v1');
   assert.equal(r.releaseId, undefined);
 });
-test('a lone mismatched draft is inspected for remediation and is never candidate evidence', async () => {
+test('an absent candidate never falls back to a lone different draft', async () => {
   const f = fixture(); f.rows['/v1/apps/123/appStoreVersions'][0].attributes.versionString = '1.0';
   const r = await inspectStore({ ...f.options, plan: { ...plan, buildProfile: 'testflight-pilot', environment: 'development' } });
   assert.equal(r.selectedVersionMatchesCandidate, false);
   assert.equal(find(r, 'candidate-version').status, 'missing');
-  assert.equal(r.inspectedVersionId, 'version');
+  assert.equal(r.inspectedVersionId, undefined);
+  assert.ok(!f.calls.some(path => path.startsWith('/v1/appStoreVersions/')));
 });
 test('ambiguous/missing versions never select another version by list order', async () => {
   for (const entries of [[], [resource('a', { platform: 'IOS', versionString: '1.0.0' }), resource('b', { platform: 'IOS', versionString: '1.0.0' })], [resource('a', { platform: 'IOS', versionString: '2.0' }), resource('b', { platform: 'IOS', versionString: '3.0' })]]) {
@@ -68,7 +69,7 @@ test('API errors are unknown, sanitized and independent fields still get inspect
   const r = await inspectStore(f.options);
   assert.equal(r.observationComplete, false);
   assert.equal(find(r, 'review-contact').status, 'unknown');
-  assert.deepEqual(r.errors, [{ code: 'review-contact', httpStatus: 403 }]);
+  assert.deepEqual(r.errors, [{ code: 'review-contact', reason: 'forbidden', httpStatus: 403 }]);
   assert.equal(find(r, 'primary-category').status, 'present');
   assert.ok(!JSON.stringify(r).includes('PRIVATE_KEY'));
 });
@@ -198,19 +199,6 @@ test('real Release Kit authentication and pagination use only GET and reject off
   assert.equal(r.observationComplete, false);
   assert.equal(find(r, 'version-inventory').status, 'unknown');
 });
-test('standalone inventory needs no candidate or journal and never picks among multiple versions', async () => {
-  const f = fixture();
-  const options = { ...f.options, plan: { ...plan, version: undefined } };
-  let r = await inspectStore(options);
-  assert.equal(r.inspectedVersionId, 'version');
-  assert.equal(find(r, 'candidate-version'), undefined);
-  assert.equal(r.selectedVersionMatchesCandidate, undefined);
-  f.rows['/v1/apps/123/appStoreVersions'].push(resource('other', { platform: 'IOS', versionString: '2.0' }));
-  r = await inspectStore(options);
-  assert.equal(r.versions.length, 2);
-  assert.equal(r.inspectedVersionId, undefined);
-  assert.equal(find(r, 'version-details').status, 'unknown');
-});
 test('invalid standalone identity and expectations fail before authentication', async () => {
   const f = fixture();
   const valid = { appId: '123', bundleId: 'test.example', apiKeyPathEnv: 'EXAMPLE_KEY' };
@@ -219,4 +207,17 @@ test('invalid standalone identity and expectations fail before authentication', 
     await assert.rejects(inspectAppStore({ ...valid, ...invalid, session: async () => assert.fail('authentication must not run') }));
   }
   assert.equal(f.calls.length, 0);
+});
+test('pure assessment replays sanitized facts without I/O and preserves scoped conclusions', async () => {
+  const f = fixture();
+  const report = await inspectStore({ ...f.options, expectedAppleBuildId: 'build' });
+  const { assessStorePreflight } = await import('./store-preflight.mjs');
+  assert.deepEqual(assessStorePreflight(report.facts, { expectedAppleBuildId: 'build' }), report.checks);
+  const before = structuredClone(report.facts);
+  const different = assessStorePreflight(report.facts, { expectedAppleBuildId: 'other' });
+  assert.equal(different.find(check => check.code === 'selected-build-identity').status, 'missing');
+  assert.deepEqual(report.facts, before);
+  assert.equal(report.conclusion, 'clear-within-scope'); assert.equal(report.rulesVersion, 1);
+  assert.match(report.assessmentScope, /not full/);
+  assert.equal(f.calls.filter(path => path.startsWith('/v1/apps/123/appStoreVersions')).length, 1);
 });
