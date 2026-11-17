@@ -26,6 +26,7 @@
     "docs/wechat-uploads.md",
     "docs/store-queries.md",
     "docs/release-storage.md",
+    "docs/resource-lifecycle.md",
     "docs/ios-upload.md",
     "README.md",
     "SECURITY.md"

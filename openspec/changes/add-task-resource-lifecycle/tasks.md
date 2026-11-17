@@ -1,30 +1,31 @@
 # Implementation and acceptance tasks
 
-All items below are future work. Proposal/schema validation is not implementation,
-deletion authorization, installed adoption or runtime acceptance.
+Checked items describe implemented core contracts, not installed adoption or native
+acceptance. Unchecked verification and consumer/rollout gates remain required;
+proposal/schema validation alone never authorizes deletion.
 
 ## 1. Freeze interfaces and resource policy
-- [ ] Define the resource event schema, generation identity, index recovery and bounded reports; preserve release/request identities and journal bytes.
-- [ ] Freeze reclaim CLI/API inputs and distinct success, protected/capacity, incomplete and cancellation outcomes; retain existing storage read contracts.
-- [ ] Define trusted adapter registration, reconstruction/reference rules, source-cleanliness checks and exact intermediate leaves; reject arbitrary target paths and candidate-selected hooks.
+- [x] Define the resource event schema, generation identity, index recovery and bounded reports; preserve release/request identities and journal bytes.
+- [x] Freeze reclaim CLI/API inputs and distinct success, protected/capacity, incomplete and cancellation outcomes; retain existing storage read contracts.
+- [x] Define trusted adapter registration, reconstruction/reference rules, source-cleanliness checks and exact intermediate leaves; reject arbitrary target paths and candidate-selected hooks.
 - [ ] Define the stable feature fence, old-control refusal, disable behavior and safe rollback/reconstruction procedure before enabling mutation.
 - [ ] Define positive cache budget, phase allocation estimates and free-space policy from measured consumer workloads; do not infer authority from TTL.
 
 ## 2. Implement lifecycle and admission
-- [ ] Persist registration before allocation and identity confirmation before use; recover interrupted creation without adopting unrelated files.
-- [ ] Implement retained/pending/reclaiming/reclaimed generations and owned/release-pending/released sessions, with durable reasons for incomplete actions.
-- [ ] Add mandatory admission capability checks to local, worker and direct heavy execution paths while retaining read-only/status and uncertain-operation recovery access.
-- [ ] Extend and test atomic maintenance/activity transitions, capacity reservations and lock ordering using the existing coordination boundary.
-- [ ] Add admission reconciliation and settlement disposition hooks using one collector; preserve busy/cancellation and subprocess cleanup fences.
-- [ ] Make cache reuse consult generation/file availability and revoke affected reuse before deletion without resetting build/publication side effects.
+- [x] Persist registration before allocation and identity confirmation before use; recover interrupted creation without adopting unrelated files.
+- [x] Implement retained/pending/reclaiming/reclaimed generations and owned/release-pending/released sessions, with durable reasons for incomplete actions.
+- [x] Add mandatory admission capability checks to local, worker and direct heavy execution paths while retaining read-only/status and uncertain-operation recovery access.
+- [x] Extend and test atomic maintenance/activity transitions, capacity reservations and lock ordering using the existing coordination boundary.
+- [x] Add admission reconciliation and settlement disposition hooks using one collector; preserve busy/cancellation and subprocess cleanup fences.
+- [x] Make cache reuse consult generation/file availability and revoke affected reuse before deletion without resetting build/publication side effects.
 
 ## 3. Implement bounded reclamation and running-resource release
-- [ ] Under exclusive maintenance, validate fresh owners, dispatch/target settlement, all retained references, source/reconstruction inputs and target identity.
-- [ ] Keep legacy/untyped/unknown resources protected; reject incomplete scans, redirected paths, unexpected mounts and ambiguous link ownership.
-- [ ] Implement intent-first, non-following bounded removal, completion verification, partial-delete recovery and actual volume before/after measurement.
-- [ ] Reclaim eligible resources by last-use order and refuse new heavy work when protected overage or free-space requirements remain unsatisfied.
-- [ ] Release only verified task-owned sessions after the last user and children settle; exclude device erasure, runtime uninstall, shared services and swap.
-- [ ] Preserve dry-run as no-write/no-stop and report task success independently from deferred or failed maintenance.
+- [x] Under exclusive maintenance, validate fresh owners, dispatch/target settlement, all retained references, source/reconstruction inputs and target identity.
+- [x] Keep legacy/untyped/unknown resources protected; reject incomplete scans, redirected paths, unexpected mounts and ambiguous link ownership.
+- [x] Implement intent-first, non-following bounded removal, completion verification, partial-delete recovery and actual volume before/after measurement.
+- [x] Reclaim eligible resources by last-use order and refuse new heavy work when protected overage or free-space requirements remain unsatisfied.
+- [x] Release only verified task-owned sessions after the last user and children settle; exclude device erasure, runtime uninstall, shared services and swap.
+- [x] Preserve dry-run as no-write/no-stop and report task success independently from deferred or failed maintenance.
 
 ## 4. Verify at actual boundaries
 - [ ] Use real temporary files, durable event writes and separate OS processes to test competing admission, maintenance transitions and reservation accounting.

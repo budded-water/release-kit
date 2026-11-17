@@ -1,5 +1,10 @@
 # Release Kit
 
+Registered preparation caches and task-owned sessions have an explicitly enabled
+[resource lifecycle](docs/resource-lifecycle.md), with admission/settlement hooks,
+bounded reclamation and recovery. Existing consumers remain unchanged until their
+reviewed adapter and managed installation are adopted and activated.
+
 A local-first mobile release CLI and runtime for pinned source validation, artifact delivery, durable recovery and bounded store observations. It has no runtime dependencies and requires Node.js 22 or newer.
 
 This is an initial extraction, not a hosted release service. Source is public and **UNLICENSED**; no package has been published to a registry. Install a reviewed Git commit, not a moving branch. Provider credentials and operational records never belong in this repository.
