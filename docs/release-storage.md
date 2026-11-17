@@ -1,5 +1,11 @@
 # Release storage inventory and cleanup preview
 
+Task lifecycle reclamation is a separate, unimplemented
+[OpenSpec proposal](../openspec/changes/add-task-resource-lifecycle/proposal.md).
+Its [design and flow](../openspec/changes/add-task-resource-lifecycle/design.md)
+describe future admission/settlement hooks, ownership, cache invalidation and rollout.
+The commands documented below remain read-only; this proposal enables no cleanup.
+
 These standalone commands inspect an existing **state root**, not a whole home,
 installation, runner or toolchain directory. They require no project module,
 release configuration, credentials, native tools or provider access.
