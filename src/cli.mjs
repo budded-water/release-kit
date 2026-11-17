@@ -45,6 +45,7 @@ plan --config <private.json> --ref <commit> [--platforms ...]
 validate --config <private.json> --ref <commit> [--platforms ...] [--ui]
 run --config <private.json> --ref <commit> [--platforms ...] [--publish]
 resume <release-id> --config <private.json> [--publish]
+upload <release-id> --config <private.json> (local, existing accepted iOS artifact)
 status <release-id> [--remote --config <private.json> [--wait <seconds> --poll-interval <seconds>]]
 executor-doctor --executor-config <private-policy.json>
 executor-check --executor-config <private-policy.json> [--executor local|auto|github]
@@ -157,6 +158,7 @@ export async function main({
       'validate',
       'run',
       'resume',
+      'upload',
       'status',
       'executor-doctor',
       'executor-check',
@@ -165,6 +167,10 @@ export async function main({
     ].includes(operation)
   )
     throw new Error(help);
+  if (operation === 'upload' && (values.publish || values.ui || values.remote ||
+      values.acceptance || values['retry-build'] || values.reconciled ||
+      values.executor !== 'local' || values['executor-config']))
+    throw new Error('Upload accepts an existing release ID and local execution only');
   const operatorOperation = ['store-record', 'store-handoff'].includes(operation);
   if ((values.receipt !== undefined) !== (operation === 'store-record'))
     throw new Error('--receipt is required only for store-record');
@@ -262,7 +268,7 @@ export async function main({
     throw new Error('Executor check does not accept release, publication or recovery options');
   const dispatchOperation = ['dispatch-status', 'dispatch-resume'].includes(operation);
   const needsId =
-    ['resume', 'status', 'store-apply', 'store-observe', 'store-record', 'store-handoff'].includes(
+    ['resume', 'upload', 'status', 'store-apply', 'store-observe', 'store-record', 'store-handoff'].includes(
       operation,
     ) || dispatchOperation;
   if (positionals.length !== (needsId ? 2 : 1)) throw new Error('Invalid positional arguments');
@@ -324,6 +330,9 @@ export async function main({
   }
   const existing =
     needsId && !dispatchOperation ? await loadState(releasePath(store, positionals[1])) : null;
+  if (existing?.uploadRequested && !existing.publicationRequested && !values.publish &&
+      values.executor !== 'local')
+    throw new Error('Bounded upload resume is local-only; dispatch does not support this intent');
   if (signal?.aborted) return 130;
   if (needsId && !dispatchOperation && !existing) throw new Error('Unknown release ID');
   if (operation === 'status' && !values.remote) {
@@ -697,6 +706,7 @@ export async function main({
     }
     const state = await runner.execute(plan, {
       publish: values.publish,
+      uploadOnly: operation === 'upload',
       acceptance,
       acceptanceDigests: dispatchBinding?.acceptanceDigests,
       retryBuild: values['retry-build']
@@ -709,6 +719,7 @@ export async function main({
           releaseId: plan.id,
           source: plan.source,
           publicationRequested: state.publicationRequested,
+          ...(state.uploadRequested === undefined ? {} : { uploadRequested: state.uploadRequested }),
           outcomes: state.outcomes,
           recordDirectory: releasePath(store, plan.id),
           diagnosticsDirectory,

@@ -10,7 +10,7 @@ This is an initial extraction, not a hosted release service. Source is public an
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | Release Kit                 | Source/plan binding, journals, stage recovery, artifact checks, publication gates, polling, dispatch claims and store API helpers |
 | Trusted project adapter     | Dependency installation, source checks, UI execution and evidence validation                                                      |
-| Platform adapters           | Build, inspect, doctor, publish and status for the project's selected platforms                                                   |
+| Platform adapters           | Build, inspect, doctor, explicit upload capability, publish and status for the project's selected platforms                        |
 | UI-eval or another verifier | Actual verification evidence; successful process exit alone is insufficient                                                       |
 
 The initial planner expects an Expo `app.json`, `eas.json` and `runtimeVersion.policy = appVersion`. Supported destination names are `ios`, `android`, and `harmony`. Expo native configuration and Harmony build hosts remain consumer-owned. This does not claim arbitrary framework support or fresh store-delivery acceptance.
@@ -87,6 +87,16 @@ policy-aware runtime/adapter while retaining the same journal.
 
 Source-only `validate` never calls platform build/publication adapters. `validate --ui` also runs the declared UI gate. `run`/`resume` retain artifact and acceptance gates. Unknown external operations require reconciliation rather than blind replay. `status --summary` is a progress projection, never approval or retry authority; omit the flag for full history. Passive `observe` differs from `status --remote`, which reconciles observations into the saved journal.
 
+### Upload without review
+
+Local `upload <release-id>` accepts an existing built and accepted iOS artifact.
+It requires an explicit `adapter.upload` capability, persists bounded upload
+intent separately from full publication, and leaves ordinary resume bounded.
+See [bounded iOS upload](docs/ios-upload.md) for API, recovery, exit semantics,
+confirmed-draft handoff and compatibility. It does not select a build, submit
+review or grant public-release intent. Android and dispatched upload are not
+implemented by this capability.
+
 ### Evidence recovery and execution outcomes
 
 If a saved UI receipt is missing, changed or rejected by the current verifier,
@@ -104,9 +114,11 @@ even when the adapter's policy identity is unchanged.
 `run`/`resume` return zero only when every selected platform has a recognized
 successful or progressing outcome: `submitted`, `in-review`, `processing`,
 `released`, or `available` with `availabilityVerified: true`. An `accepted`
-artifact also qualifies when publication has not been requested. Zero indicates
-execution progress, not store availability. `pending-review`, `pending-release`,
-`prepared`, `uploaded`, absent results, and unknown adapter states return nonzero.
+artifact also qualifies when neither publication nor bounded upload has been requested.
+An `uploaded` result qualifies only for the explicit upload-only intent described
+above; it remains nonzero for full publication. Zero indicates execution progress,
+not store availability. `pending-review`, `pending-release`, `prepared`, absent
+results and unknown adapter states return nonzero.
 Adapters must use these explicit outcomes. Polling uses the same classification
 but succeeds only when all selected platforms have verified availability.
 

@@ -16,7 +16,9 @@ export function releaseExitCode(state) {
       platforms.some((platform) => !['ios', 'android', 'harmony'].includes(platform))) return 2;
   return platforms.every((platform) => {
     const classification = classifyOutcome(state.outcomes?.[platform]);
+    if (platform === 'ios' && state.uploadRequested === true &&
+        state.publicationRequested !== true && state.outcomes[platform]?.state === 'uploaded') return true;
     return classification === 'available' || classification === 'waiting' ||
-      (classification === 'accepted' && state.publicationRequested !== true);
+      (classification === 'accepted' && state.publicationRequested !== true && state.uploadRequested !== true);
   }) ? 0 : 2;
 }

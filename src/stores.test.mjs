@@ -4,7 +4,7 @@ import { createHash, generateKeyPairSync } from 'node:crypto';
 import { mkdtemp, mkdir, writeFile, readFile, access, rm, symlink, chmod } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { doctorStore, publishStore, statusStore } from './stores.mjs';
+import { doctorStore, publishStore, uploadStore, statusStore } from './stores.mjs';
 
 const appleKey = generateKeyPairSync('ec', {
   namedCurve: 'prime256v1',
@@ -2029,6 +2029,7 @@ test('prepared iOS publication explicitly restores automatic/full release while 
   f.ctx.preparation = {
     status: 'prepared',
     inputDigest: (await loadStoreContent(f.ctx)).inputDigest,
+    observation: { remote: { target: { id: 'version-2' } } },
   };
   f.ctx.session = async () => ({
     cfg: { appId: '123', bundleId: 'com.example.app' },
@@ -2081,4 +2082,69 @@ test('prepared iOS publication explicitly restores automatic/full release while 
       .length,
     0,
   );
+});
+
+
+test('bounded iOS upload stops at immediately VALID build without selection, policy or review writes', async t => {
+  const f = await fixture(t, 'ios');
+  // Upload does not consume review-submission declarations.
+  await rm(path.join(f.ctx.root, 'submission.json'));
+  appleProvider(f, { hasBuild: false, afterUpload: () => f.commands.length > 0 });
+  const out = await uploadStore(f.ctx);
+  assert.equal(out.state, 'uploaded');
+  assert.equal(out.buildId, 'build-42');
+  assert.equal(f.commands.length, 1);
+  assert.deepEqual(f.commands[0].args.slice(0, 2), ['pilot', 'upload']);
+  assert.equal(f.commands[0].args[f.commands[0].args.indexOf('--skip_submission') + 1], 'true');
+  assert.ok(f.commands[0].args.includes(f.ctx.artifact.path));
+  assert.ok(f.calls.every(call => !call.opts.method || call.opts.method === 'GET'));
+  assert.ok(f.journal.every(entry => entry.name === 'ios-upload'));
+  assert.equal(f.ctx.previous['ios-review'], undefined);
+  assert.equal((await uploadStore(f.ctx)).state, 'uploaded');
+  assert.equal(f.commands.length, 1);
+  assert.equal(f.ctx.previous['ios-upload'].buildId, 'build-42');
+});
+
+test('bounded upload reconciles unknown results and never reuploads an absent intent', async t => {
+  const f = await fixture(t, 'ios');
+  appleProvider(f, { hasBuild: false });
+  let uploads = 0;
+  f.ctx.command = async () => { uploads++; throw Error('lost response'); };
+  assert.equal((await uploadStore(f.ctx)).state, 'unknown');
+  assert.equal(f.ctx.previous['ios-upload'].state, 'unknown');
+  assert.equal((await uploadStore(f.ctx)).state, 'unknown');
+  assert.equal(uploads, 1);
+  appleProvider(f);
+  assert.equal((await uploadStore(f.ctx)).state, 'uploaded');
+  assert.equal(uploads, 1);
+  assert.equal(f.ctx.previous['ios-review'], undefined);
+});
+
+test('bounded uploader refuses changed bytes, broader intent, review history and unsupported platform', async t => {
+  for (const variant of ['bytes', 'intent', 'review', 'platform']) {
+    const f = await fixture(t, variant === 'platform' ? 'android' : 'ios');
+    if (variant === 'bytes') await writeFile(f.ctx.artifact.path, 'changed');
+    if (variant === 'intent') f.ctx.publicationRequested = true;
+    if (variant === 'review') f.checkpoint('ios-review', { state: 'unknown' });
+    await assert.rejects(uploadStore(f.ctx));
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.commands.length, 0);
+    assert.equal(f.journal.length, 0);
+  }
+});
+
+
+test('bounded upload preflight checks pilot and listing without review-submission input', async t => {
+  const f = await fixture(t, 'ios');
+  f.ctx.uploadRequested = true;
+  f.ctx.publicationRequested = false;
+  await rm(path.join(f.ctx.root, 'submission.json'));
+  appleProvider(f);
+  const report = await doctorStore(f.ctx);
+  assert.ok(report.checks.length > 0);
+  assert.ok(report.checks.every(check => check.ok));
+  assert.equal(report.checks.at(-1).name, 'iOS upload metadata and Fastlane');
+  assert.deepEqual(f.commands.map(command => command.args), [['pilot', 'upload', '--help']]);
+  assert.ok(f.calls.every(call => !call.opts.method || call.opts.method === 'GET'));
+  assert.deepEqual(f.journal, []);
 });

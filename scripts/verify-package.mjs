@@ -49,6 +49,11 @@ try {
     import assert from 'node:assert/strict';
     import { fileURLToPath } from 'node:url';
     import { main } from '@budded-water/release-kit/cli';
+    import { uploadStore } from '@budded-water/release-kit/stores';
+    assert.equal(typeof uploadStore, 'function');
+    let uploadHelp;
+    assert.equal(await main({args:['upload','--help'],output:s=>uploadHelp=s}),0);
+    assert.match(uploadHelp,/upload <release-id>/);
     import { inspectAppStore, assessStorePreflight } from '@budded-water/release-kit/store-preflight';
     import { listStoreVersions, getStoreVersion } from '@budded-water/release-kit/store-query';
     assert.equal(typeof listStoreVersions, 'function');

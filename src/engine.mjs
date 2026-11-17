@@ -18,7 +18,7 @@ import {
   assertAcceptanceTestedBuild,
   acceptanceConfig,
 } from './plan.mjs';
-import { prepareStoreContent } from './store-content.mjs';
+import { prepareStoreContent, verifyAppleDraftContinuity } from './store-content.mjs';
 import { requireProject } from './project.mjs';
 import { createCleanupGuard } from './cleanup.mjs';
 import { runCommand } from './command.mjs';
@@ -166,6 +166,7 @@ export function createRunner({
     command,
     signal,
     publicationRequested: state.publicationRequested,
+    uploadRequested: state.uploadRequested === true,
     artifact: state.artifacts[platform],
     preparation: state.storePreparation?.[platform],
     assertPublicationSource: () =>
@@ -440,7 +441,6 @@ export function createRunner({
       if (
         !artifact ||
         !replacement ||
-        Object.keys(previous?.storePreparation?.[platform]?.steps ?? {}).length > 0 ||
         previous.plan.source !== owner.source ||
         previous.plan.repository !== state.plan.repository ||
         previous.plan.configDigest !== state.plan.configDigest ||
@@ -481,6 +481,25 @@ export function createRunner({
       }
       const checkpoints = previous.checkpoints?.[platform] ?? {};
       const unpublished = !hasProviderIntent(checkpoints);
+      const prepared = previous.storePreparation?.[platform];
+      const proposed = state.storePreparation?.[platform];
+      const preparationSteps = Object.values(prepared?.steps ?? {});
+      // A current descendant may adopt the same confirmed draft/content before
+      // any binary operation. Both preparation snapshots remain in their journals.
+      const preparedDraftOnly = platform === 'ios' && unpublished &&
+        prepared?.status === 'prepared' && prepared.observation?.matches === true &&
+        preparationSteps.length > 0 && preparationSteps.every(step => step.state === 'confirmed') &&
+        typeof prepared.inputDigest === 'string' && prepared.inputDigest === proposed?.inputDigest &&
+        artifact.version === replacement.version &&
+        typeof prepared.observation.remote?.target?.id === 'string' &&
+        prepared.observation.remote.target.id === proposed.proposal?.before?.target?.id;
+      if (preparationSteps.length > 0 && !preparedDraftOnly) return false;
+      const preparedDraftProof = preparedDraftOnly
+        ? await cleanup.run(() => verifyAppleDraftContinuity({
+            ...context(state, directory, platform, checkoutDirectory(state, directory, platform)),
+            session: adapters[platform]?.contentSession,
+          }, { inputDigest: prepared.inputDigest, versionId: prepared.observation.remote.target.id }))
+        : null;
       const unuploadedEdit =
         platform === 'android' &&
         checkpoints['android-edit']?.state === 'created' &&
@@ -547,14 +566,19 @@ export function createRunner({
         )
           return false;
       }
+      if (preparedDraftProof)
+        await verifyProductionSource(state, directory, platform,
+          checkoutDirectory(state, directory, platform), 'prepared-draft-handoff');
       const record = {
         platform,
         previousReleaseId: owner.id,
         replacementReleaseId: state.plan.id,
         source: previous.plan.source,
         replacementSource: state.plan.source,
-        reason: unpublished
-          ? 'no-provider-intent'
+        reason: preparedDraftOnly
+          ? 'confirmed-prepared-draft-no-upload'
+          : unpublished
+            ? 'no-provider-intent'
           : platform === 'ios'
             ? 'confirmed-unsubmitted-upload'
             : unuploadedEdit
@@ -568,6 +592,7 @@ export function createRunner({
                 stage: previous.stages[`publish-${platform}`] ?? null,
               },
             }),
+        ...(preparedDraftProof ? { preparedContent: preparedDraftProof } : {}),
         ...(reservation ? { abandonedReservationId: reservedId } : {}),
         recordedAt: now(),
       };
@@ -632,7 +657,7 @@ export function createRunner({
         if (error.code !== 'ENOENT') throw error;
       }
       if (owner && owner.id !== state.plan.id) {
-        if (state.stages[`publish-${platform}`])
+        if (state.stages[`publish-${platform}`] || state.stages[`upload-${platform}`])
           throw new Error(
             'This release was superseded; an older resume cannot overwrite the current publication owner',
           );
@@ -719,7 +744,7 @@ export function createRunner({
       const root = join(directory, 'store-content-source');
       await prepareCheckout({ repo, root, source: plan.source, command });
       // A prepared edit/draft cannot be changed once publication has started.
-      if (mode !== 'observe' && state.stages[`publish-${platform}`])
+      if (mode !== 'observe' && (state.stages[`publish-${platform}`] || state.stages[`upload-${platform}`]))
         throw new Error('Publication has started; only store-observe is allowed');
       let unlock;
       try {
@@ -772,9 +797,27 @@ export function createRunner({
   }
   async function execute(
     plan,
-    { publish = false, acceptance = {}, acceptanceDigests = {}, retryBuild } = {},
+    { publish = false, uploadOnly = false, acceptance = {}, acceptanceDigests = {}, retryBuild } = {},
   ) {
+    if (typeof uploadOnly !== 'boolean' || (uploadOnly && (publish || retryBuild)))
+      throw new Error('Upload-only execution cannot grant publication or retry a build');
     return withRelease(plan, async (state, directory) => {
+      if (state.uploadRequested !== undefined && typeof state.uploadRequested !== 'boolean')
+        throw new Error('Invalid saved upload intent');
+      if (uploadOnly && (state.publicationRequested || state.checkpoints.ios?.['ios-review'] ||
+          state.stages['publish-ios']))
+        throw new Error('Full publication has already started; upload cannot narrow its intent');
+      const boundedUpload = !state.publicationRequested && !publish &&
+        (uploadOnly || state.uploadRequested === true);
+      if (boundedUpload) {
+        if (plan.platforms.length !== 1 || plan.platforms[0] !== 'ios')
+          throw new Error('Upload-only execution requires exactly one iOS platform');
+        if (typeof adapters.ios?.upload !== 'function')
+          throw new Error('The iOS adapter must explicitly support upload; publish is not a fallback');
+        if (state.stages['build-ios']?.status !== 'succeeded' || !state.artifacts.ios ||
+            (uploadOnly && (!state.acceptance.ios || state.acceptanceStatus?.ios?.state !== 'passed')))
+          throw new Error('Upload requires an existing built artifact and passing native acceptance');
+      }
       for (const platform of Object.keys(acceptance)) {
         if (!plan.platforms.includes(platform) || !acceptance[platform])
           throw new Error('Acceptance input must identify a selected platform and receipt path');
@@ -807,7 +850,7 @@ export function createRunner({
           Object.keys(state.checkpoints[platform] ?? {}).some(
             (key) => key !== (platform === 'harmony' ? 'harmony.sign.intent' : 'expo.environment'),
           ) ||
-          state.stages[`publish-${platform}`]
+          (state.stages[`publish-${platform}`] || state.stages[`upload-${platform}`])
         )
           throw new Error(
             'Only an unresolved build without publication checkpoints can be retried',
@@ -829,12 +872,13 @@ export function createRunner({
         delete state.acceptance[platform];
         delete state.checkpoints[platform];
       }
+      if (uploadOnly) state.uploadRequested = true;
       state.publicationRequested = state.publicationRequested || publish;
       await saveState(directory, state);
       // Installed Expo native phases cannot safely expand workspace paths with
       // whitespace. Source-only validation remains usable in such directories.
       assertNativeWorkspace(directory);
-      if (state.publicationRequested) {
+      if (state.publicationRequested || state.uploadRequested) {
         for (const platform of plan.platforms) {
           const preflight = adapters[platform].preflight;
           const providerKeys =
@@ -936,7 +980,7 @@ export function createRunner({
           }
           if (!state.acceptance[platform] || acceptance[platform])
             await accept(state, directory, platform, root, acceptance, acceptanceDigests);
-          if (!state.publicationRequested) {
+          if (!state.publicationRequested && !state.uploadRequested) {
             state.outcomes[platform] = {
               state: state.acceptance[platform] ? 'accepted' : 'awaiting_acceptance',
             };
@@ -950,7 +994,8 @@ export function createRunner({
             };
             continue;
           }
-          const prior = state.stages[`publish-${platform}`];
+          const deliveryStage = `${boundedUpload ? 'upload' : 'publish'}-${platform}`;
+          const prior = state.stages[deliveryStage];
           const observeOnly =
             prior?.status === 'succeeded' &&
             prior.output?.retryable !== true &&
@@ -975,8 +1020,9 @@ export function createRunner({
               state.outcomes[platform] = await step(
                 state,
                 directory,
-                `publish-${platform}`,
-                () => adapters[platform].publish(context(state, directory, platform, root)),
+                deliveryStage,
+                () => adapters[platform][boundedUpload ? 'upload' : 'publish'](
+                  context(state, directory, platform, root)),
                 { sideEffect: true, reconcile: true, repeat: true },
               );
             }
@@ -1029,7 +1075,8 @@ export function createRunner({
           observed[platform] = { state: 'unknown', message: errorMessage(error) };
         }
         observationSignal?.throwIfAborted();
-        if (state.stages[`publish-${platform}`]) state.outcomes[platform] = observed[platform];
+        if (state.stages[`publish-${platform}`] || state.stages[`upload-${platform}`])
+          state.outcomes[platform] = observed[platform];
       }
       state.observedAt = now();
       state.observations = observed;

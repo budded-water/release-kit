@@ -14,3 +14,16 @@ test('exit success requires recognized results for every selected platform', () 
       outcomes: { harmony: { state: 'accepted' } } }), publicationRequested ? 2 : 0);
   }
 });
+
+
+test('uploaded success is restricted to upload-only intent and accepted is not upload completion', () => {
+  const state = { plan: { platforms: ['ios'] }, publicationRequested: false,
+    outcomes: { ios: { state: 'uploaded' } } };
+  assert.equal(releaseExitCode(state), 2);
+  assert.equal(releaseExitCode({ ...state, uploadRequested: true }), 0);
+  assert.equal(releaseExitCode({ ...state, uploadRequested: true, publicationRequested: true }), 2);
+  assert.equal(releaseExitCode({ ...state, uploadRequested: true,
+    outcomes: { ios: { state: 'accepted' } } }), 2);
+  assert.equal(releaseExitCode({ ...state, uploadRequested: true,
+    outcomes: { ios: { state: 'unknown' } } }), 2);
+});

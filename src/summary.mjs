@@ -31,6 +31,7 @@ function executionSummary(value) {
       'nodeVersion',
       'scope',
       'publicationRequested',
+      'uploadRequested',
       'outcomes',
       'recordDirectory',
       'diagnosticsDirectory',
@@ -79,7 +80,7 @@ export function summarizeStatus(operation, value) {
     releaseId: value.plan?.id,
     source: value.plan?.source,
     platforms: value.plan?.platforms,
-    ...pick(value, ['publicationRequested', 'outcomes', 'observations', 'statusPolling']),
+    ...pick(value, ['publicationRequested', 'uploadRequested', 'outcomes', 'observations', 'statusPolling']),
     stages: Object.fromEntries(
       Object.entries(value.stages ?? {}).map(([name, stage]) => [
         name,
