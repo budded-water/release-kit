@@ -134,7 +134,7 @@ async function get(ctx, route, query, jwt) {
 
 // Read-only visibility. Raw app-info contains review passwords and government IDs;
 // only the explicitly selected public operational fields may leave this module.
-export async function inspectAgc(ctx) {
+export async function inspectAgc(ctx, selection = {}) {
   const report = {
     supported: true,
     provider: 'appgallery-connect',
@@ -146,6 +146,13 @@ export async function inspectAgc(ctx) {
   try {
     ctx.signal?.throwIfAborted();
     const cfg = settings(ctx);
+    const releaseType = selection.releaseType ?? 1;
+    const versionId = selection.versionId ?? cfg.versionId;
+    if (![1, 6].includes(releaseType) ||
+        (versionId !== undefined && !id(versionId)) ||
+        (releaseType === 6 && !versionId) ||
+        (cfg.versionId && selection.versionId && cfg.versionId !== selection.versionId))
+      throw new AgcError('AGC_CONFIG', 'Select a supported release type and matching exact version ID.');
     const jwt = await token(ctx, cfg);
     ctx.signal?.throwIfAborted();
     const lookup = await get(
@@ -164,20 +171,20 @@ export async function inspectAgc(ctx) {
       '/api/publish/v3/app-info',
       {
         appId: cfg.appId,
-        releaseType: '1',
-        ...(cfg.versionId ? { versionId: cfg.versionId } : {}),
+        releaseType: String(releaseType),
+        ...(versionId ? { versionId } : {}),
         ...(cfg.language ? { lang: cfg.language } : {}),
       },
       jwt,
     );
     if (!object(data.appInfo)) throw new AgcError('AGC_RESPONSE', 'AGC app-info is missing.');
     const info = data.appInfo;
-    if (cfg.versionId && info.versionId !== cfg.versionId)
+    if (versionId && info.versionId !== versionId)
       throw new AgcError(
         'AGC_IDENTITY',
-        'Provider version differs from the configured formal-release target.',
+        'Provider version differs from the exact release target.',
       );
-    const app = { appId: cfg.appId, bundleId: cfg.bundleId, releaseType: 1 };
+    const app = { appId: cfg.appId, bundleId: cfg.bundleId, releaseType };
     for (const key of ['releaseState', 'reviewState', 'versionCode', 'onShelfVersionCode']) {
       if (!Object.hasOwn(info, key)) continue;
       if (!Number.isSafeInteger(info[key]))
@@ -201,10 +208,11 @@ export async function inspectAgc(ctx) {
     app.auditOpinionPresent =
       typeof data.auditInfo?.auditOpinion === 'string' && !!data.auditInfo.auditOpinion.trim();
     report.app = app;
+    if (selection.preflight === true) report.metadata = metadataFacts(data);
     report.checks.push({
       name: 'harmony provider visibility',
       ok: true,
-      message: 'Harmony app identity and selected formal-release metadata are visible.',
+      message: 'Harmony app identity and selected release metadata are visible.',
     });
     report.ok = true;
   } catch (error) {
@@ -217,4 +225,23 @@ export async function inspectAgc(ctx) {
     });
   }
   return report;
+}
+
+function metadataFacts(data) {
+  const present = value => typeof value === 'string' && value.trim().length > 0;
+  const web = value => {
+    try { return ['https:', 'http:'].includes(new URL(value).protocol); } catch { return false; }
+  };
+  const info = data.appInfo;
+  const locales = Array.isArray(data.languages) ? data.languages : null;
+  if (locales && (locales.length > 1000 || locales.some(entry => !object(entry))))
+    throw new AgcError('AGC_RESPONSE', 'AGC localization metadata is malformed or exceeds its bound.');
+  return {
+    privacyWebUrl: web(info.privacyPolicy),
+    reviewAccessPresent: present(info.testUserName) && present(info.testUserPassword),
+    localizations: locales?.map(entry => {
+      const locale = typeof entry?.lang === 'string' && /^[A-Za-z0-9_-]{2,35}$/.test(entry.lang) ? entry.lang : null;
+      return { locale, namePresent: present(entry.appName), descriptionPresent: present(entry.appDesc) };
+    }) ?? null,
+  };
 }

@@ -2,9 +2,11 @@
 
 ## Configuration and private data
 
-The three new read commands support App Store Connect / IOS / App Store only.
-Unsupported providers/platform flags fail explicitly; Google/Harmony parity and
-TestFlight queries are not advertised. No project adapter is required.
+The three read commands default to App Store Connect / IOS / App Store for
+compatibility. Explicit provider selection adds the scoped Google Play/Harmony
+reads described below. Provider selectors are validated independently; unsupported
+combinations fail explicitly. TestFlight queries are not advertised. No project
+adapter is required.
 
 A private regular JSON file supplies existing authorized app/key references:
 
@@ -132,3 +134,98 @@ checks and the specific provider-confirmed, uncommitted review-conflict retry ru
 These are optimistic observations and explicit failure handling, not atomic
 cross-machine exclusion or automatic task takeover. Existing machine-local locks
 still protect local invocation; saved journals retain operation identity.
+
+## Google Play and Harmony reads
+
+```sh
+release-kit store-versions --provider google-play --config /absolute/private/store.json --track production
+release-kit store-status --provider google-play --config /absolute/private/store.json --track production --version-code 42
+release-kit store-preflight --provider google-play --config /absolute/private/store.json --track internal --version-code 42
+release-kit store-status --provider appgallery-connect --config /absolute/private/store.json --release-type 1 --version-id 123456789
+release-kit store-preflight --provider appgallery-connect --config /absolute/private/store.json --release-type 6 --version-id 123456789
+```
+
+`--provider` defaults to `app-store-connect`; it is never inferred from credentials.
+Apple retains `--version` and optional `--build-id`. Play requires an explicit track;
+status/preflight also require a decimal `--version-code` in Android's supported
+range. Named tracks use bounded letters/digits, dots, hyphens, underscores or
+colons (including form-factor prefixes). Harmony status/preflight require an exact
+numeric `--version-id` and `--release-type 1` (formal) or `6` (test). A configured
+Harmony versionId must agree with the selector. Selectors from another provider,
+Harmony `store-versions`, release IDs, state/publish/dispatch options are refused.
+There is no fallback to another track or version.
+
+Private Play configuration reuses `stores.android.packageName` and either
+`serviceAccountPathEnv` or the existing explicit `auth.type=gcloud-impersonation`
+mode from the README. Harmony reuses `stores.harmony.appId`, `bundleId`,
+`serviceAccountPathEnv` and optional language/versionId. Neither requires Expo
+configuration or a managed-publishing assertion. Reads do not change publisher
+policy gates, install tools, create credentials, grant permissions or log in.
+The selected existing Google SDK is trusted and may maintain its own auth cache;
+the runner creates no release/task/diagnostic files and does not provision keys.
+
+The Node APIs retain provider-specific identities:
+
+```js
+import { listPlayReleases, getPlayRelease, getHarmonyRelease }
+  from '@budded-water/release-kit/provider-store-query';
+import { inspectProviderStore, assessProviderPreflight }
+  from '@budded-water/release-kit/provider-store-preflight';
+
+const report = await getPlayRelease({ store: privateConfig.stores.android,
+  track: 'production', versionCode: '42', environment: process.env });
+const harmony = await getHarmonyRelease({ store: privateConfig.stores.harmony,
+  releaseType: 6, versionId: '123456789', environment: process.env });
+const preflight = await inspectProviderStore({ provider: 'google-play',
+  store: privateConfig.stores.android, track: 'production', versionCode: '42' });
+const replay = assessProviderPreflight(preflight.facts);
+```
+
+APIs share the existing 1–3600000 ms overall deadline contract (default 120000);
+CLI accepts 1–300 seconds. Parent cancellation reaches auth, the optional Google
+command and provider reads. Late responses cannot produce a completed report.
+Play bodies are bounded to 4 MiB, with at most four requests for one operation;
+only exact OAuth/configured-IAM authentication POSTs and the selected package/track
+GET are allowed, with no edit creation, redirects or automatic retries. Harmony
+reuses bounded package lookup and app-info GETs and PS256 Service Account signing.
+
+Reports retain exact targets, observation times, coverage, sanitized errors and
+`observationComplete`. Play coverage is `selected-track-nonobsolete-max20`; an
+unmatched code is `not-observed`, not global absence. Multiple matching releases
+are `ambiguous`; inaccessible or malformed responses are `unavailable`. Release
+names are omitted. Harmony coverage is `exact-selected-version`; mismatched app or
+version identity is unavailable, never another-version selection. Missing state
+is incomplete; future states retain raw values and unknown interpretation.
+
+Google review approval and publication are separate. Only an explicit
+APPROVED_NOT_PUBLISHED state establishes review approval in this summary adapter;
+PUBLISHED retains unknown review approval because internal tests may not undergo
+standard policy/security reviews. Published on a track can include partial/halted
+rollout and never proves full device/country availability.
+Harmony test availability is `testing`, not formal `published`; formal/test raw
+state interpretation differs. Raw review codes are retained without inventing
+approval from optional reviewState. Neither report establishes source/binary
+ownership, a particular review attempt, tester installation or permission to write.
+
+Play preflight reports listing, reviewer access, declarations and managed
+publishing as `unsupported`, without opening an edit. Harmony preflight projects
+only policy-URL syntax, reviewer-credential presence and localized name/description
+presence from the same app-info response; values, contacts, document URLs and audit
+opinions remain private. Screenshot coverage, policy truth and actual reviewer
+login remain unsupported. Missing optional reviewer credentials stay unknown;
+whether the product needs them is a project-specific requirement. Pure replay validates the fact envelope and performs no
+I/O or authentication. Reports include checks/counts and remain `incomplete` for
+unsupported guarantees, or `blocked` for observed missing metadata;
+`publicReleaseReady` is always false. CLI exit 0 means observation completed, even
+for rejection, bounded not-observed or incomplete preflight; unavailable reads
+return 2. Invalid selectors and cancellation fail without success JSON.
+
+Official sources: [Play summaries](https://developers.google.com/android-publisher/api-ref/rest/v3/applications.tracks.releases/list),
+[Play lifecycle](https://developers.google.com/android-publisher/api-ref/rest/v3/applications.tracks.releases),
+[internal-test review limits](https://support.google.com/googleplay/android-developer/answer/9845334?hl=en),
+[Harmony version queries](https://developer.huawei.com/consumer/cn/doc/app/agc-help-publish-api-appinfo-query-0000002236041422/),
+[Harmony state meanings](https://developer.huawei.com/consumer/cn/doc/App/agc-help-publish-api-data-appinfo-0000002236041454/).
+
+Synthetic auth/HTTP/CLI and packed-consumer checks establish implementation behavior,
+not live account access. Real Play/Harmony acceptance and installed consumer
+adoption remain pending; the active OpenSpec change retains those boundaries.
