@@ -79,8 +79,23 @@ rechecks the prepared draft identity and content at its provider boundary. A
 legacy preparation without a recorded draft identity must be observed and
 reconciled before execution.
 
-The proposed normative contract is in the active
-[upload change](../openspec/changes/add-ios-upload-only/specs/store-publication/spec.md).
+The normative contract is in the
+[store publication spec](../openspec/specs/store-publication/spec.md).
 Synthetic tests establish routing/recovery and provider-call boundaries only.
 Consumer adoption, installed-control maintenance and authorized actual upload
 require separate evidence; do not claim them from package tests.
+
+## Acceptance scope
+
+Bounded live acceptance has separately exercised a reviewed consumer adoption,
+managed controller upgrade, current-source build/native evidence, confirmed
+unused-draft handoff and an actual upload reaching Apple PROCESSING. Independent
+official reads confirmed the same manual draft, no selected build and no review
+submission; the journal kept full publication false and recorded no review or
+release checkpoint. Operational evidence and account identifiers remain private.
+
+This acceptance does not establish review, public availability, a TestFlight/App
+Store installation, exhaustive device/business coverage or live provider-failure
+recovery. Immediate VALID and uncertain-response/restart cases remain synthetic
+test evidence. Query current provider state for later decisions; a saved success
+or missing visibility never authorizes another upload.
