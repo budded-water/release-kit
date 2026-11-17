@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createRunner } from '../src/engine.mjs';
 import { createPlan } from '../src/plan.mjs';
 import { runCommand } from '../src/command.mjs';
-import { digest, loadState, releasePath } from '../src/state.mjs';
+import { digest, loadState, releasePath, saveState } from '../src/state.mjs';
 import { main } from '../src/cli.mjs';
 import { createRequest, dispatchRequest, runRequest, readRequestStatus, inspectDispatchRequests } from '../src/executor.mjs';
 import { workerMain } from '../src/worker.mjs';
@@ -77,10 +77,10 @@ async function fixture(t, platforms = ['ios', 'android']) {
   const receipts = async state => Object.fromEntries(await Promise.all(platforms.map(async platform => {
     const path = join(base, `${platform}-acceptance.json`);
     await writeFile(path, JSON.stringify({
-      schemaVersion: 1, kind: 'native-acceptance', source: plan.source, platform,
+      schemaVersion: 1, kind: 'native-acceptance', source: state.plan.source, platform,
       artifactSha256: state.artifacts[platform].sha256, passed: true,
       checkedAt: new Date().toISOString(), provenance: 'operator', checks: [{ name: 'synthetic', passed: true }],
-      testedBuild: { kind: 'artifact', source: plan.source, sha256: state.artifacts[platform].sha256 },
+      testedBuild: { kind: 'artifact', source: state.plan.source, sha256: state.artifacts[platform].sha256 },
     }));
     return [platform, path];
   })));
@@ -349,4 +349,230 @@ test('matching declared counterpart acceptance is reused without rebuilding or r
   assert.equal(resumed.acceptanceStatus.ios.state, 'passed');
   assert.equal(f.calls.filter(x => x === 'build-ios').length, 1);
   assert.equal(f.calls.filter(x => x === 'publish-ios').length, 0);
+});
+
+
+async function acceptedIos(f) {
+  const built = await f.runner().execute(f.plan);
+  return f.runner().execute(f.plan, { acceptance: await f.receipts(built) });
+}
+function boundedAdapter(f) {
+  f.adapters.ios.upload = async ctx => {
+    assert.equal(ctx.publicationRequested, false);
+    assert.equal(ctx.uploadRequested, true);
+    f.calls.push('upload-ios');
+    await ctx.checkpoint('ios-upload', { state: 'uploaded', buildId: 'owned-build' });
+    return { state: 'uploaded', buildId: 'owned-build' };
+  };
+}
+
+test('upload CLI requires an existing accepted artifact and a distinct upload hook before admitting intent', async t => {
+  const f = await fixture(t, ['ios']);
+  boundedAdapter(f);
+  await assert.rejects(f.cli(['upload', f.plan.id]), /Unknown release/);
+  await f.runner().execute(f.plan);
+  const before = await f.state();
+  await assert.rejects(f.cli(['upload', f.plan.id]), /passing native acceptance/);
+  assert.deepEqual(await f.state(), before);
+  await acceptedIos(f);
+  delete f.adapters.ios.upload;
+  const accepted = await f.state();
+  await assert.rejects(f.cli(['upload', f.plan.id]), /explicitly support upload/);
+  assert.deepEqual(await f.state(), accepted);
+  assert.equal(f.calls.includes('publish-ios'), false);
+  assert.equal(f.calls.includes('upload-ios'), false);
+  assert.equal(f.calls.filter(x => x === 'build-ios').length, 1);
+});
+
+test('bounded upload persists across ordinary resume and only explicit publish escalates', async t => {
+  const f = await fixture(t, ['ios']);
+  boundedAdapter(f);
+  await acceptedIos(f);
+  assert.equal(await f.cli(['upload', f.plan.id]), 0);
+  const uploaded = await f.state();
+  assert.equal(uploaded.uploadRequested, true);
+  assert.equal(uploaded.publicationRequested, false);
+  assert.equal(uploaded.outcomes.ios.state, 'uploaded');
+  assert.equal(uploaded.stages['publish-ios'], undefined);
+  assert.equal(uploaded.checkpoints.ios['ios-review'], undefined);
+  assert.equal(await f.cli(['resume', f.plan.id]), 0);
+  const resumed = await f.state();
+  assert.equal(resumed.uploadRequested, true);
+  assert.equal(resumed.publicationRequested, false);
+  assert.equal(f.calls.includes('publish-ios'), false);
+  assert.equal(f.calls.filter(x => x === 'build-ios').length, 1);
+  f.adapters.ios.publish = async ctx => {
+    assert.equal(ctx.publicationRequested, true);
+    assert.equal(ctx.previous['ios-upload'].buildId, 'owned-build');
+    f.calls.push('publish-ios');
+    await ctx.checkpoint('ios-review', { state: 'submitted' });
+    return { state: 'submitted' };
+  };
+  assert.equal(await f.cli(['resume', f.plan.id, '--publish']), 0);
+  assert.equal((await f.state()).publicationRequested, true);
+  assert.equal(f.calls.filter(x => x === 'publish-ios').length, 1);
+  const before = await f.state();
+  await assert.rejects(f.cli(['upload', f.plan.id]), /cannot narrow/);
+  assert.deepEqual(await f.state(), before);
+});
+
+test('bounded upload failure preserves unknown checkpoint and ownership for reconciliation', async t => {
+  const f = await fixture(t, ['ios']);
+  await acceptedIos(f);
+  let first = true;
+  f.adapters.ios.upload = async ctx => {
+    f.calls.push('upload-ios');
+    if (first) {
+      first = false;
+      await ctx.checkpoint('ios-upload', { state: 'intent' });
+      throw Error('lost upload response');
+    }
+    assert.deepEqual(ctx.previous['ios-upload'], { state: 'intent' });
+    assert.equal(ctx.publicationRequested, false);
+    await ctx.checkpoint('ios-upload', { state: 'uploaded', buildId: 'reconciled' });
+    return { state: 'uploaded', buildId: 'reconciled' };
+  };
+  assert.equal(await f.cli(['upload', f.plan.id]), 2);
+  const failed = await f.state();
+  assert.equal(failed.uploadRequested, true);
+  assert.equal(failed.stages['upload-ios'].status, 'unknown');
+  assert.deepEqual(failed.checkpoints.ios['ios-upload'], { state: 'intent' });
+  assert.equal((await readdir(join(f.store, 'targets'))).length, 1);
+  assert.equal(await f.cli(['resume', f.plan.id]), 0);
+  assert.equal((await f.state()).checkpoints.ios['ios-upload'].buildId, 'reconciled');
+  assert.equal(f.calls.includes('publish-ios'), false);
+});
+
+test('upload command rejects unsupported scheduling, broad flags and platform selections', async t => {
+  const f = await fixture(t, ['ios']);
+  boundedAdapter(f);
+  await acceptedIos(f);
+  const before = await f.state();
+  for (const flags of [['--publish'], ['--ui'], ['--remote'], ['--acceptance', 'ios=x'],
+    ['--executor', 'github'], ['--executor', 'auto'], ['--ref', f.plan.source]]) {
+    await assert.rejects(f.cli(['upload', f.plan.id, ...flags]));
+    assert.deepEqual(await f.state(), before);
+  }
+  const both = await fixture(t);
+  const built = await both.runner().execute(both.plan);
+  await both.runner().execute(both.plan, { acceptance: await both.receipts(built) });
+  await assert.rejects(both.cli(['upload', both.plan.id]), /exactly one iOS/);
+});
+
+test('upload and bounded resume preserve source, artifact and UI evidence gates', async t => {
+  for (const variant of ['source', 'artifact', 'ui']) {
+    const f = await fixture(t, ['ios']);
+    boundedAdapter(f);
+    const accepted = await acceptedIos(f);
+    if (variant === 'source') {
+      await writeFile(join(f.repo, 'new.txt'), 'new merged source');
+      await runCommand('git', ['add', '.'], { cwd: f.repo });
+      await runCommand('git', ['commit', '-qm', 'new source'], { cwd: f.repo });
+    } else if (variant === 'artifact') {
+      await writeFile(accepted.artifacts.ios.path, 'changed');
+    } else {
+      await writeFile(accepted.uiValidation.evidence.path, 'changed');
+    }
+    if (variant === 'ui') await assert.rejects(f.cli(['upload', f.plan.id]));
+    else assert.equal(await f.cli(['upload', f.plan.id]), 2);
+    const state = await f.state();
+    assert.equal(state.publicationRequested, false);
+    assert.equal(state.checkpoints.ios?.['ios-upload'], undefined);
+    assert.equal(f.calls.includes('upload-ios'), false);
+    assert.equal(f.calls.includes('publish-ios'), false);
+    assert.equal(f.calls.filter(x => x === 'build-ios').length, 1);
+  }
+});
+
+test('bounded native-acceptance replacement can fail and recover without granting publication', async t => {
+  const f = await fixture(t, ['ios']);
+  boundedAdapter(f);
+  const accepted = await acceptedIos(f);
+  await f.cli(['upload', f.plan.id]);
+  const receipts = await f.receipts(accepted);
+  const good = await readFile(receipts.ios, 'utf8');
+  await writeFile(receipts.ios, '{}');
+  assert.equal(await f.cli(['resume', f.plan.id, '--acceptance', `ios=${receipts.ios}`]), 2);
+  assert.equal((await f.state()).acceptance.ios, undefined);
+  const count = f.calls.filter(x => x === 'upload-ios').length;
+  await writeFile(receipts.ios, good);
+  assert.equal(await f.cli(['resume', f.plan.id, '--acceptance', `ios=${receipts.ios}`]), 0);
+  assert.equal(f.calls.filter(x => x === 'upload-ios').length, count + 1);
+  assert.equal((await f.state()).publicationRequested, false);
+});
+
+test('bounded resume refuses dispatch before creating a request', async t => {
+  const f = await fixture(t, ['ios']);
+  boundedAdapter(f);
+  await acceptedIos(f);
+  await f.cli(['upload', f.plan.id]);
+  const policy = { schemaVersion: 1, repository: 'example/synthetic', controlRepository: f.repo,
+    releaseConfig: f.configPath, stateDirectory: f.store,
+    github: { enabled: false, workflow: 'release-local.yml', ref: 'main',
+      runnerName: 'synthetic-mac', runnerLabel: 'release-example' } };
+  const policyPath = join(f.base, 'executor.json');
+  await writeFile(policyPath, JSON.stringify(policy));
+  await assert.rejects(f.cli(['resume', f.plan.id, '--executor', 'auto', '--executor-config', policyPath]), /local-only/);
+  const inventory = await inspectDispatchRequests({ stateDirectory: f.store });
+  assert.equal(inventory.requests.length, 0);
+});
+
+test('upload stage fences content writes before provider intent', async t => {
+  const f = await fixture(t, ['ios']);
+  boundedAdapter(f);
+  await acceptedIos(f);
+  const state = await f.state();
+  state.uploadRequested = true;
+  state.stages['upload-ios'] = { status: 'unknown', startedAt: new Date().toISOString() };
+  await saveState(releasePath(f.store, f.plan.id), state);
+  await assert.rejects(f.runner().prepareContent(f.plan, { mode: 'apply', approval: '0'.repeat(64) }), /only store-observe/);
+});
+
+
+test('confirmed same-content draft with no binary intent can transfer to a newer accepted descendant', async t => {
+  for (const variant of ['same', 'changed-content', 'changed-draft', 'unknown-step', 'upload-intent', 'not-prepared']) {
+    const f = await fixture(t, ['ios']);
+    const accepted = await acceptedIos(f);
+    const inputDigest = 'b'.repeat(64);
+    accepted.storePreparation = { ios: { inputDigest, status: 'prepared',
+      steps: { draft: { state: 'confirmed' }, 'text:en': { state: 'confirmed' } },
+      observation: { matches: true, remote: { target: { id: 'draft-1' } } } } };
+    if (variant === 'unknown-step') accepted.storePreparation.ios.steps.draft.state = 'intent';
+    if (variant === 'not-prepared') accepted.storePreparation.ios.status = 'applying';
+    if (variant === 'upload-intent') accepted.checkpoints.ios = { 'ios-upload': { state: 'intent' } };
+    await saveState(releasePath(f.store, f.plan.id), accepted);
+    const key = digest({ appId: accepted.artifacts.ios.appId, platform: 'ios', destination: 'app-store' });
+    await mkdir(join(f.store, 'targets'), { recursive: true });
+    await writeFile(join(f.store, 'targets', `${key}.json`), JSON.stringify({ id: f.plan.id, source: f.plan.source }));
+    await writeFile(join(f.repo, 'new.txt'), 'reviewed descendant');
+    await runCommand('git', ['add', '.'], { cwd: f.repo });
+    await runCommand('git', ['commit', '-qm', 'reviewed descendant'], { cwd: f.repo });
+    const plan = await createPlan({ repo: f.repo, ref: 'HEAD', platforms: ['ios'], config: f.config });
+    const build = f.adapters.ios.build;
+    f.adapters.ios.build = async ctx => ({ ...await build(ctx), buildNumber: '2' });
+    const built = await f.runner().execute(plan);
+    await f.runner().execute(plan, { acceptance: await f.receipts(built) });
+    const next = await loadState(releasePath(f.store, plan.id));
+    next.storePreparation = { ios: { inputDigest: variant === 'changed-content' ? 'c'.repeat(64) : inputDigest,
+      status: 'planned', steps: {}, proposal: { before: { target: { id: variant === 'changed-draft' ? 'draft-2' : 'draft-1' } } } } };
+    await saveState(releasePath(f.store, plan.id), next);
+    boundedAdapter(f);
+    const result = await f.runner().execute(plan, { uploadOnly: true });
+    const old = await f.state();
+    if (variant === 'same') {
+      assert.equal(result.outcomes.ios.state, 'uploaded');
+      assert.equal(old.outcomes.ios.state, 'superseded');
+      assert.equal(old.supersededBy.ios.releaseId, plan.id);
+      assert.equal(result.supersessions[0].reason, 'confirmed-prepared-draft-no-upload');
+      assert.equal(result.supersessions[0].preparedContent.versionId, 'draft-1');
+      assert.deepEqual(old.storePreparation, accepted.storePreparation);
+      assert.equal(old.checkpoints.ios?.['ios-upload'], undefined);
+      assert.equal((await f.runner().execute(f.plan)).outcomes.ios.state, 'blocked');
+    } else {
+      assert.equal(result.outcomes.ios.state, 'blocked', variant);
+      assert.equal(old.supersededBy, undefined, variant);
+      assert.equal(f.calls.includes('upload-ios'), false, variant);
+    }
+    assert.equal(f.calls.includes('publish-ios'), false);
+  }
 });

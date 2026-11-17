@@ -139,3 +139,13 @@ test('summary cannot hide a content approval plan or start execution', async () 
       }),
     );
 });
+
+
+test('bounded upload intent remains explicit in progress summaries', () => {
+  const value = { plan: { id: 'release-one' }, uploadRequested: true,
+    publicationRequested: false, outcomes: { ios: { state: 'uploaded' } } };
+  const report = summarizeStatus('status', value);
+  assert.equal(report.uploadRequested, true);
+  assert.equal(report.publicationRequested, false);
+  assert.equal(report.outcomes.ios.state, 'uploaded');
+});

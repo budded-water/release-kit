@@ -753,17 +753,19 @@ async function prepareAppleReleasePolicy(ctx, token, versionId) {
   }
 }
 
-async function publishApple(ctx, cfg) {
+async function publishApple(ctx, cfg, { uploadOnly = false } = {}) {
   const metadata = await sourcePath(ctx, cfg.metadataPath, true);
-  const informationPath = await sourcePath(ctx, cfg.submissionInformationPath);
   let information;
-  try {
-    information = JSON.parse(await readFile(informationPath, 'utf8'));
-  } catch {
-    throw new StoreError('Review submission information is missing or invalid.');
+  if (!uploadOnly) {
+    const informationPath = await sourcePath(ctx, cfg.submissionInformationPath);
+    try {
+      information = JSON.parse(await readFile(informationPath, 'utf8'));
+    } catch {
+      throw new StoreError('Review submission information is missing or invalid.');
+    }
+    if (!information || Array.isArray(information) || typeof information !== 'object')
+      throw new StoreError('Review submission information must be a JSON object.');
   }
-  if (!information || Array.isArray(information) || typeof information !== 'object')
-    throw new StoreError('Review submission information must be a JSON object.');
   const token = await appleToken(ctx, cfg);
   let observed = await observeApple(ctx, cfg, token, { allowRejectedReplacement: true });
   const upload = previous(ctx, 'ios-upload');
@@ -837,6 +839,12 @@ async function publishApple(ctx, cfg) {
     return result(ctx, 'rejected', { buildId: observed.buildId, providerState: processing });
   if (processing !== 'VALID') return appleResult(ctx, observed);
   await save(ctx, 'ios-upload', { state: 'uploaded', buildId: observed.buildId });
+  if (uploadOnly)
+    return result(ctx, 'uploaded', {
+      buildId: observed.buildId,
+      availabilityVerified: false,
+      message: 'Exact build uploaded; build selection, review and release were not requested.',
+    });
   if (previous(ctx, 'ios-review'))
     return result(ctx, 'unknown', {
       buildId: observed.buildId,
@@ -1323,8 +1331,10 @@ export async function doctorStore(ctx) {
         return { checks };
       }
       await sourcePath(ctx, cfg.metadataPath, true);
-      await sourcePath(ctx, cfg.submissionInformationPath);
-      await fastlaneWorkspace((cwd) => fastlane(ctx, ['deliver', '--help'], cwd));
+      const uploadOnly = ctx.uploadRequested === true && !ctx.publicationRequested;
+      if (!uploadOnly) await sourcePath(ctx, cfg.submissionInformationPath);
+      await fastlaneWorkspace((cwd) => fastlane(ctx,
+        uploadOnly ? ['pilot', 'upload', '--help'] : ['deliver', '--help'], cwd));
       const cfgMetadata = await sourcePath(ctx, cfg.metadataPath, true);
       const token = await appleToken(ctx, cfg);
       const app = await request(ctx, `${APPLE}/v1/apps/${segment(cfg.appId)}`, token);
@@ -1332,7 +1342,7 @@ export async function doctorStore(ctx) {
         throw new StoreError('Remote App Store app has a different bundle identifier.');
       const listing = await appleListing(ctx, cfg, token, cfgMetadata);
       checks.push({
-        name: 'iOS review metadata and Fastlane',
+        name: uploadOnly ? 'iOS upload metadata and Fastlane' : 'iOS review metadata and Fastlane',
         ok: true,
         message:
           'Read-only listing audit and isolated Fastlane help passed; content, declarations, native acceptance and Apple approval remain separate gates.',
@@ -1350,6 +1360,18 @@ export async function doctorStore(ctx) {
     });
   }
   return { checks };
+}
+
+// Separate capability: callers cannot turn a publish-only adapter into an uploader.
+export async function uploadStore(ctx) {
+  ctx.signal?.throwIfAborted();
+  if (ctx.platform !== 'ios') throw new StoreError('Upload-only supports iOS only.');
+  if (ctx.publicationRequested || previous(ctx, 'ios-review'))
+    throw new StoreError('Upload-only cannot narrow existing publication or review intent.');
+  const cfg = settings(ctx);
+  identity(ctx);
+  await verifyFile(ctx);
+  return publishApple(ctx, cfg, { uploadOnly: true });
 }
 
 export async function publishStore(ctx) {
