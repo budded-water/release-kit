@@ -174,6 +174,33 @@ test('overall deadlines and parent cancellation reject late Play/Harmony success
   } })]) await assert.rejects(operation(), { name: 'TimeoutError' });
 });
 
+test('Harmony request-only timeout rejects late headers/body without advancing a timed-out lookup', async t => {
+  const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, 'timeout', () => originalTimeout(5));
+  for (const phase of ['lookup', 'app-info']) for (const late of ['headers', 'body']) {
+    const f = await fixture(t), parent = new AbortController();
+    const report = await getHarmonyRelease({ ...f.harmony, signal: parent.signal, timeoutMs: 1000,
+      fetch: async (url, init) => {
+        const response = await f.harmony.fetch(url, init);
+        const targeted = phase === 'lookup' ? url.includes('appid-list') : url.includes('app-info');
+        if (!targeted) return response;
+        if (late === 'headers') {
+          await new Promise(resolve => setTimeout(resolve, 15));
+          return response;
+        }
+        const bytes = new TextEncoder().encode(await response.text());
+        return new Response(new ReadableStream({ start(controller) {
+          setTimeout(() => { controller.enqueue(bytes); controller.close(); }, 15);
+        } }));
+      } });
+    assert.equal(report.observationComplete, false, `${phase}/${late}`);
+    assert.equal(report.resolution, 'unavailable'); assert.equal(report.release, undefined);
+    assert.equal(parent.signal.aborted, false);
+    assert.equal(f.calls.length, phase === 'lookup' ? 1 : 2);
+    assert.equal(JSON.stringify(report).includes(privateValue), false);
+  }
+});
+
 test('Play route/method budget refuses a session attempting edits, external origins or repeated reads', async t => {
   const f = await fixture(t);
   for (const mode of ['edit', 'origin', 'method', 'budget']) {

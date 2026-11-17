@@ -85,15 +85,17 @@ async function get(ctx, route, query, jwt) {
   ctx.signal?.throwIfAborted();
   const url = new URL(route, BASE);
   url.search = new URLSearchParams(query).toString();
+  const timeout = AbortSignal.timeout(60000);
+  const requestSignal = ctx.signal ? AbortSignal.any([ctx.signal, timeout]) : timeout;
   let response;
   try {
-    const timeout = AbortSignal.timeout(60000);
     response = await (ctx.fetch ?? fetch)(url.href, {
       method: 'GET',
       redirect: 'error',
-      signal: ctx.signal ? AbortSignal.any([ctx.signal, timeout]) : timeout,
+      signal: requestSignal,
       headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
     });
+    requestSignal.throwIfAborted();
   } catch {
     ctx.signal?.throwIfAborted();
     throw new AgcError('AGC_TRANSPORT', 'AGC provider read could not be completed.');
@@ -107,11 +109,13 @@ async function get(ctx, route, query, jwt) {
     const chunks = [];
     let bytes = 0;
     for await (const chunk of response.body) {
+      requestSignal.throwIfAborted();
       bytes += chunk.length;
       if (bytes > 4 * 1024 * 1024) throw new Error();
       chunks.push(chunk);
     }
     data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    requestSignal.throwIfAborted();
     // The published API schemas include both object and JSON-string ret values.
     const ret = typeof data.ret === 'string' ? JSON.parse(data.ret) : data.ret;
     if (!object(ret) || !Number.isInteger(ret.code)) throw new Error();
@@ -122,13 +126,15 @@ async function get(ctx, route, query, jwt) {
       );
   } catch (error) {
     ctx.signal?.throwIfAborted();
+    if (requestSignal.aborted)
+      throw new AgcError('AGC_TRANSPORT', 'AGC provider read exceeded its request deadline.');
     if (error instanceof AgcError) throw error;
     throw new AgcError(
       'AGC_RESPONSE',
       'AGC response is incomplete or does not match its documented schema.',
     );
   }
-  ctx.signal?.throwIfAborted();
+  requestSignal.throwIfAborted();
   return data;
 }
 

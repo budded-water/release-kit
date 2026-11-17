@@ -188,6 +188,9 @@ Play bodies are bounded to 4 MiB, with at most four requests for one operation;
 only exact OAuth/configured-IAM authentication POSTs and the selected package/track
 GET are allowed, with no edit creation, redirects or automatic retries. Harmony
 reuses bounded package lookup and app-info GETs and PS256 Service Account signing.
+Its combined per-request signal is checked after headers and during/after body
+consumption; a request-only timeout cannot advance lookup or become a successful
+observation while the overall deadline is still open.
 
 Reports retain exact targets, observation times, coverage, sanitized errors and
 `observationComplete`. Play coverage is `selected-track-nonobsolete-max20`; an

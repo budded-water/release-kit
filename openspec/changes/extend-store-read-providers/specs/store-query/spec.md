@@ -43,3 +43,9 @@ maintain its own authentication cache outside runner-managed state.
 - **WHEN** Play reports a release as published on the selected track
 - **THEN** publication is observed without inferring a review approval, since
   internal testing may be available without standard policy/security review
+
+#### Scenario: Request deadline expires before the operation deadline
+- **WHEN** a provider returns headers or body after its per-request deadline
+  while the operation-wide deadline remains open
+- **THEN** the read is unavailable and cannot establish successful status or
+  advance a timed-out identity lookup to another provider request

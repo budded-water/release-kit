@@ -52,6 +52,12 @@ An explicitly selected existing gcloud installation may maintain its own auth
 cache; the read-only claim concerns store resources and runner-managed output,
 not a filesystem sandbox around the trusted Google SDK.
 
+AGC's combined per-request signal is checked after response headers, during body
+consumption and before accepting parsed data. Expiry of that request alone must
+make the read unavailable even while the operation-wide deadline remains open;
+a timed-out package lookup must not advance to app-info. This also corrects the
+shared legacy inspector's late-response handling without changing its endpoints.
+
 ## Verification and rollout
 Test generated synthetic credentials through the actual HTTP/CLI boundary, including
 two unrelated app identities, keyless command confinement, secret-bearing error
