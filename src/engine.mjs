@@ -245,6 +245,7 @@ export function createRunner({
         state.stages['install-validation']?.status === 'succeeded' &&
         state.stages['install-validation'].output?.policy === policy;
       const checksReused = installationReused &&
+        (!resourceContext.getStore() || await resourceContext.getStore().reuseAvailable('checks')) &&
         state.stages.checks?.status === 'succeeded' &&
         state.stages.checks.output?.policy === policy;
       // Revoke stale passes durably before a replacement installation can fail or

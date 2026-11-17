@@ -103,7 +103,7 @@ export async function main({
 } = {}) {
   if (signal?.aborted) return 130;
   if (args[0] === 'storage-reclaim') return resourceReclaimMain({ args, repo, project,
-    command: executeCommand, signal, resourceLease, output });
+    command: executeCommand, signal, resourceLease, environment, output });
   if (['storage-inspect', 'storage-plan'].includes(args[0])) return storageMain({ args, signal, output });
   if (['store-versions', 'store-status', 'store-preflight'].includes(args[0])) return storeReadMain({ args, environment, signal, output });
   if (args[0] === 'wechat') return wechatMain({ args: args.slice(1), repo, project: wechatProject, command: executeCommand, signal, output });
@@ -326,7 +326,7 @@ export async function main({
   if (values['lifecycle-config']) {
     if (resourceLifecycle) throw new Error('Lifecycle policy is already bound by the managed entry');
     resourceLifecycle = await loadResourceLifecycle(values['lifecycle-config'],
-      { repo, store, project, command: executeCommand, signal });
+      { repo, store, project, command: executeCommand, signal, environment });
   }
   if (policy) assertExecutionPaths(policy, { repo, configPath, store });
   if (operatorOperation) {

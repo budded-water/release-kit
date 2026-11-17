@@ -100,32 +100,56 @@ async function fixture(t, platforms = ['ios', 'android']) {
 
 const cleanupError = () => Object.assign(new Error('Synthetic unsettled process group'), { cleanupIncomplete: true });
 
-async function enableResourceLifecycle(f) {
+async function lifecycleFixture(t, platforms = ['ios']) {
+  const f = await fixture(t, platforms);
+  await runCommand('git', ['remote', 'set-url', 'origin', 'https://github.com/example/synthetic.git'], { cwd: f.repo });
+  f.plan = await createPlan({ repo: f.repo, ref: 'HEAD', platforms, config: f.config });
+  f.state = () => loadState(releasePath(f.store, f.plan.id));
+  // Substitute only transport: source verification still resolves and fetches
+  // the actual local Git default branch and checks the isolated checkout.
+  f.options.command = (binary, args, options) => runCommand(binary,
+    binary === 'git' && ['ls-remote', 'fetch'].includes(args[0])
+      ? args.map(arg => arg === 'origin' ? f.repo : arg) : args, options);
+  const receipts = f.receipts;
+  f.receipts = async state => {
+    const result = await receipts(state);
+    for (const platform of platforms) {
+      const path = join(releasePath(f.store, f.plan.id), `${platform}-acceptance.json`);
+      await writeFile(path, await readFile(result[platform]));
+      result[platform] = path;
+    }
+    return result;
+  };
+  return f;
+}
+
+async function enableResourceLifecycle(f, stage = 'ui-eval', cacheBudgetBytes = 8) {
   const anchor = join(f.base, 'coordination');
   await mkdir(anchor, { mode: 0o700 });
   await mkdir(f.store, { mode: 0o700, recursive: true });
   const adapter = { schemaVersion: 1, policy: 'd'.repeat(64),
-    caches: { compiler: { path: '.ui-eval/build/intermediates', stages: ['ui-eval'] } },
+    caches: { compiler: { path: '.ui-eval/build/intermediates', stages: [stage] } },
     references: async () => [],
     toolchain: async () => 'e'.repeat(64),
     reconstructable: async ({ resource }) => ({ source: resource.source, toolchain: resource.toolchain, sourceClean: true,
       inputsAvailable: true, recoveryIndependent: true }) };
-  const policy = { schemaVersion: 1, coordinationAnchor: anchor, cacheBudgetBytes: 8,
+  const policy = { schemaVersion: 1, coordinationAnchor: anchor, cacheBudgetBytes,
     minimumFreeBytes: 1, phaseBytes: { validate: 1, execute: 1, content: 1 } };
   const lifecycle = createResourceLifecycle({ stateDirectory: f.store, policy, adapter });
   const lease = await acquireMaintenance(anchor, { operation: 'synthetic lifecycle activation' });
   await lifecycle.activate({ lease });
   await lease.release();
-  const evaluate = f.project.evaluateUI;
-  f.project.evaluateUI = async ctx => {
+  const hook = stage === 'checks' ? 'checkSource' : 'evaluateUI';
+  const evaluate = f.project[hook];
+  f.project[hook] = async ctx => {
     const cache = await ctx.resources.prepareCache('compiler', ctx.root);
-    await writeFile(join(cache, 'object.o'), '0123456789abcdef');
+    await writeFile(join(cache, 'object.o'), '0'.repeat(f.cacheBytes ?? 16));
     return evaluate(ctx);
   };
   return lifecycle;
 }
 
-test('activated engine refuses bypass and rebuilds reclaimed UI preparation without replaying publication', async t => {
+test('activated engine refuses bypass and rebuilds reclaimed UI preparation', async t => {
   const f = await fixture(t);
   // Production histories record a repository URL, not a filesystem dependency
   // outside the state root. Keep validation local; it never fetches this origin.
@@ -186,6 +210,71 @@ test('enabled dispatch releases its observer before one worker claims and valida
   assert.equal(repeated.state, 'completed');
   assert.equal(await readFile(join(f.store, 'dispatch', 'requests', request.id, 'claim.json'), 'utf8'), claimBefore);
   assert.equal(f.calls.filter(call => call === 'ui').length, 1);
+});
+
+test('reclaimed checks cache reruns checks while preserving installation reuse and prior pass evidence', async t => {
+  const f = await lifecycleFixture(t);
+  f.options.resourceLifecycle = await enableResourceLifecycle(f, 'checks');
+  await f.runner().validate(f.plan);
+  await f.runner().validate(f.plan);
+  assert.equal(f.calls.filter(call => call === 'checks').length, 2);
+  assert.equal(f.calls.filter(call => call === 'install-validation').length, 1);
+  const events = join(releasePath(f.store, f.plan.id), 'events');
+  const history = await Promise.all((await readdir(events)).map(async name => JSON.parse(await readFile(join(events, name)))));
+  assert.ok(history.some(event => event.state.stages.checks?.status === 'succeeded'));
+  assert.ok(history.some(event => event.state.stages.checks?.status === 'invalidated'));
+});
+
+test('enabled lifecycle reclaims preparation and resumes completed native publication without repeating side effects', async t => {
+  const f = await lifecycleFixture(t, ['ios', 'android']);
+  f.options.resourceLifecycle = await enableResourceLifecycle(f, 'ui-eval', 64);
+  f.cacheBytes = 128;
+  const validation = f.runner();
+  await validation.validate(f.plan, { ui: true });
+  assert.equal(validation.resourceMaintenance.resources[0].disposition, 'reclaimed');
+  f.cacheBytes = 16;
+  const built = await f.runner().execute(f.plan, { publish: true });
+  assert.equal(built.outcomes.ios.state, 'awaiting_acceptance');
+  const submitted = await f.runner().execute(f.plan, { acceptance: await f.receipts(built) });
+  assert.equal(submitted.outcomes.ios.state, 'submitted');
+  const resumed = await f.runner().execute(f.plan);
+  assert.equal(resumed.outcomes.ios.state, 'in-review');
+  assert.ok(f.calls.filter(call => call === 'ui').length >= 2);
+  for (const platform of f.plan.platforms) {
+    assert.equal(f.calls.filter(call => call === `build-${platform}`).length, 1);
+    assert.equal(f.calls.filter(call => call === `publish-${platform}`).length, 1);
+    assert.deepEqual(resumed.checkpoints[platform], submitted.checkpoints[platform]);
+  }
+});
+
+test('enabled lifecycle preserves uncertain publication checkpoint and never resubmits on resume', async t => {
+  const f = await lifecycleFixture(t);
+  f.options.resourceLifecycle = await enableResourceLifecycle(f, 'ui-eval', 64);
+  f.cacheBytes = 128;
+  const validation = f.runner();
+  await validation.validate(f.plan, { ui: true });
+  assert.equal(validation.resourceMaintenance.resources[0].disposition, 'reclaimed');
+  f.cacheBytes = 16;
+  let reconciliations = 0;
+  f.adapters.ios.publish = async ctx => {
+    reconciliations++;
+    if (ctx.previous['ios-upload']) {
+      assert.deepEqual(ctx.previous['ios-upload'], { state: 'intent' });
+      throw new Error('Synthetic provider reconciliation remains uncertain');
+    }
+    f.calls.push('publish-ios');
+    await ctx.checkpoint('ios-upload', { state: 'intent' });
+    throw new Error('Synthetic lost provider response');
+  };
+  const built = await f.runner().execute(f.plan, { publish: true });
+  const failed = await f.runner().execute(f.plan, { acceptance: await f.receipts(built) });
+  assert.equal(failed.stages['publish-ios'].status, 'unknown');
+  const resumed = await f.runner().execute(f.plan);
+  assert.equal(resumed.stages['publish-ios'].status, 'unknown');
+  assert.deepEqual(resumed.checkpoints.ios, failed.checkpoints.ios);
+  assert.equal(f.calls.filter(call => call === 'build-ios').length, 1);
+  assert.equal(f.calls.filter(call => call === 'publish-ios').length, 1);
+  assert.equal(reconciliations, 2);
 });
 
 test('run/resume preserves builds and submission checkpoints, and revokes failed replacement acceptance', async t => {

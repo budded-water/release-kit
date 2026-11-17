@@ -13,6 +13,28 @@ import { digest, privateDirectory, releasePath, saveState } from './state.mjs';
 import { main } from './cli.mjs';
 
 const plan = { id: `release-${'a'.repeat(24)}`, source: 'b'.repeat(40) };
+
+test('cache kinds cannot alias or overlap declaration leaves', async t => {
+  for (const path of ['.native/intermediates', '.native', '.native/intermediates/child']) {
+    await assert.rejects(fixture(t, { caches: {
+      compiler: { path: '.native/intermediates', stages: ['ui-eval'] },
+      checks: { path, stages: ['checks'] },
+    } }), { code: 'RESOURCE_POLICY' });
+  }
+});
+
+test('reclaim CLI passes the selected execution environment to its trusted adapter', async t => {
+  const f = await fixture(t);
+  const path = join(f.root, 'policy.json');
+  await writeFile(path, JSON.stringify(f.policy), { mode: 0o600 });
+  const environment = { DEVELOPER_DIR: '/synthetic/toolchain' };
+  let received;
+  const code = await main({ args: ['storage-reclaim', '--config', path, '--dry-run'], environment,
+    project: { resourceAdapter: async options => { received = options.environment; return f.adapter; } },
+    output() {} });
+  assert.equal(code, 0);
+  assert.equal(received, environment);
+});
 async function fixture(t, overrides = {}, options = {}) {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'resource-lifecycle-'));
   t.after(() => rm(root, { recursive: true, force: true }));

@@ -48,6 +48,9 @@ function validatePolicy(policy, adapter) {
         declaration.stages.some(stage => !['install-validation', 'checks', 'ui-eval'].includes(stage)))
       throw resourceError('RESOURCE_POLICY', 'Cache declarations require exact preparation leaves and reuse dependencies');
   }
+  const paths = Object.values(adapter.caches).map(declaration => declaration.path);
+  if (paths.some((path, index) => paths.slice(index + 1).some(other => overlapsPath(path, other))))
+    throw resourceError('RESOURCE_POLICY', 'Cache declarations must have distinct nonoverlapping leaves');
 }
 
 export async function assertResourceAdmission({ store, plan, session }) {
@@ -415,6 +418,8 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
             throw resourceError('RESOURCE_LEGACY', 'Existing undeclared cache is protected; classify it separately');
           if (resource) {
             validateResource(resource);
+            if (resource.kind !== kind)
+              throw resourceError('RESOURCE_POLICY', 'Cache identity belongs to another declared kind');
             if (!['retained', 'pending', 'reclaimed'].includes(resource.state))
               throw resourceError('RESOURCE_INCOMPLETE', 'Resource generation requires reconciliation');
             if (resource.source !== plan.source || resource.toolchain !== toolchain)

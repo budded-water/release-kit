@@ -4,18 +4,18 @@ import { acquireMaintenance } from './coordination.mjs';
 import { createResourceLifecycle } from './resource-lifecycle.mjs';
 import { readResourceJson, resourceError, resourceCode } from './resource-ledger.mjs';
 
-export async function loadResourceLifecycle(path, { repo, store, project, command, signal } = {}) {
+export async function loadResourceLifecycle(path, { repo, store, project, command, signal, environment = process.env } = {}) {
   if (typeof project?.resourceAdapter !== 'function')
     throw resourceError('RESOURCE_POLICY', 'Lifecycle requires the explicitly supplied trusted project adapter');
   const policy = (await readResourceJson(resolve(path))).value;
   if (typeof policy.stateDirectory !== 'string' || resolve(policy.stateDirectory) !== policy.stateDirectory ||
       store && resolve(store) !== policy.stateDirectory)
     throw resourceError('RESOURCE_POLICY', 'Lifecycle policy does not bind the selected canonical state root');
-  const adapter = await project.resourceAdapter({ policy, repo, command, signal });
+  const adapter = await project.resourceAdapter({ policy, repo, command, signal, environment });
   return createResourceLifecycle({ stateDirectory: policy.stateDirectory, policy, adapter, signal });
 }
 
-export async function resourceReclaimMain({ args, repo, project, command, signal, resourceLease, output = console.log } = {}) {
+export async function resourceReclaimMain({ args, repo, project, command, signal, resourceLease, environment = process.env, output = console.log } = {}) {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true,
     options: { config: { type: 'string' }, 'dry-run': { type: 'boolean' }, help: { type: 'boolean' } } });
   if (values.help) {
@@ -25,7 +25,7 @@ export async function resourceReclaimMain({ args, repo, project, command, signal
   if (positionals.length !== 1 || positionals[0] !== 'storage-reclaim' || !values.config)
     throw resourceError('RESOURCE_POLICY', 'storage-reclaim requires only an explicit lifecycle policy');
   signal?.throwIfAborted();
-  const lifecycle = await loadResourceLifecycle(values.config, { repo, project, command, signal });
+  const lifecycle = await loadResourceLifecycle(values.config, { repo, project, command, signal, environment });
   let lease = resourceLease;
   try {
     if (!values['dry-run'] && !lease)

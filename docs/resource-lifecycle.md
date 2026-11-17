@@ -41,10 +41,10 @@ reconciliation, not directory replacement.
 ## Trusted adapter and resource boundaries
 
 The project's `resourceAdapter` factory receives explicit policy, supervised command
-runner and repository context. Its version-1 result supplies:
+runner, selected execution environment and repository context. Its version-1 result supplies:
 
 - SHA-256 `policy` identity covering semantic inputs;
-- `caches`: exact relative preparation leaves and affected `stages`, drawn from
+- `caches`: distinct, nonoverlapping relative preparation leaves and affected `stages`, drawn from
   `install-validation`, `checks`, `ui-eval`;
 - `toolchain`: verified SHA-256 identity before cache use;
 - `references`: verified required absolute paths from retained reports;
