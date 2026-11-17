@@ -50,3 +50,25 @@ after those reads and before revocation. Record the fresh observation time; save
 snapshots alone are insufficient. Upload/publication rechecks draft identity and
 content at its provider boundary; missing historical identity fails closed.
 Normal current-source, higher-build and provider snapshot checks remain required.
+
+## Verification and adoption boundary
+
+Implementation checks include packed pnpm/npm consumers, supported Node CI and
+independent review. A separately reviewed consumer adopted the explicit upload
+hook and pinned runtime; managed maintenance preserved its existing journals,
+artifacts and private inputs. Its current-source checks, Simulator evidence and
+operator-labeled physical counterpart acceptance preceded the actual upload.
+The counterpart relationship was verified without claiming direct installation
+of App Store IPA bytes or exhaustive native/business acceptance.
+
+Authorized live acceptance exercised the confirmed unused-draft handoff and one
+bounded upload. The predecessor was revoked through append-only supersession;
+the new artifact reached Apple PROCESSING. Independent official reads afterward
+confirmed the same manual draft, no selected build and not-submitted review state.
+The journal retained upload intent with full publication false and no review or
+release checkpoint. Real credentials, paths, identifiers and evidence stay private.
+
+Live processing is not review, availability or installation acceptance. Synthetic
+tests cover immediate VALID and unknown-response/restart behavior; live acceptance
+did not induce provider failures or grant publication escalation. Operational
+status can advance after this dated acceptance and must be queried afresh.
