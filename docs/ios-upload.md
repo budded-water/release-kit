@@ -62,14 +62,20 @@ build must be strictly higher at the same version/app/configuration, and the old
 preparation must be `prepared` with matching readback and all steps confirmed.
 The new source's separately reviewed content proposal must bind the same input
 digest and exact draft ID. Changed content/drafts, partial or unknown preparation,
-upload/review intents and conflicting target ownership remain blocked.
+upload/review intents and conflicting target ownership remain blocked. Before
+revoking the predecessor, a fresh read under both locks must confirm the exact
+provider draft ID and content. The transfer records that observation time. A
+provider replacement with identical content still blocks the handoff.
 
 This uses the existing target and predecessor locks and append-only supersession
 records. It copies no successful build, UI or acceptance stages. New content apply
 still checks the provider snapshot before and after taking ownership and reads
 back its own result. The old task cannot later upload or publish. A source advance
 still requires the consumer's current-source build and verification policy; this
-handoff is not permission to reuse obsolete binary bytes.
+handoff is not permission to reuse obsolete binary bytes. Upload/publication also
+rechecks the prepared draft identity and content at its provider boundary. A
+legacy preparation without a recorded draft identity must be observed and
+reconciled before execution.
 
 The proposed normative contract is in the active
 [upload change](../openspec/changes/add-ios-upload-only/specs/store-publication/spec.md).

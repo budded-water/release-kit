@@ -18,7 +18,7 @@ import {
   assertAcceptanceTestedBuild,
   acceptanceConfig,
 } from './plan.mjs';
-import { prepareStoreContent } from './store-content.mjs';
+import { prepareStoreContent, verifyAppleDraftContinuity } from './store-content.mjs';
 import { requireProject } from './project.mjs';
 import { createCleanupGuard } from './cleanup.mjs';
 import { runCommand } from './command.mjs';
@@ -494,6 +494,12 @@ export function createRunner({
         typeof prepared.observation.remote?.target?.id === 'string' &&
         prepared.observation.remote.target.id === proposed.proposal?.before?.target?.id;
       if (preparationSteps.length > 0 && !preparedDraftOnly) return false;
+      const preparedDraftProof = preparedDraftOnly
+        ? await cleanup.run(() => verifyAppleDraftContinuity({
+            ...context(state, directory, platform, checkoutDirectory(state, directory, platform)),
+            session: adapters[platform]?.contentSession,
+          }, { inputDigest: prepared.inputDigest, versionId: prepared.observation.remote.target.id }))
+        : null;
       const unuploadedEdit =
         platform === 'android' &&
         checkpoints['android-edit']?.state === 'created' &&
@@ -583,10 +589,7 @@ export function createRunner({
                 stage: previous.stages[`publish-${platform}`] ?? null,
               },
             }),
-        ...(preparedDraftOnly ? { preparedContent: {
-          inputDigest: prepared.inputDigest,
-          versionId: prepared.observation.remote.target.id,
-        } } : {}),
+        ...(preparedDraftProof ? { preparedContent: preparedDraftProof } : {}),
         ...(reservation ? { abandonedReservationId: reservedId } : {}),
         recordedAt: now(),
       };

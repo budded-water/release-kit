@@ -43,5 +43,9 @@ An actual consumer upgrade can advance source after a draft was prepared. Allow
 the existing locked supersession path to transfer that exact draft only when the
 old preparation is fully confirmed, its readback matches, no binary intent exists,
 and a new content proposal binds the same digest/draft. Retain both artifacts and
-all original preparation evidence; record the transfer and revoke the old task.
+all original preparation evidence. Under the target and predecessor locks, read
+the provider again and require the exact draft ID and content before recording
+the transfer or revoking the old task. Record the fresh observation time; saved
+snapshots alone are insufficient. Upload/publication rechecks draft identity and
+content at its provider boundary; missing historical identity fails closed.
 Normal current-source, higher-build and provider snapshot checks remain required.

@@ -2029,6 +2029,7 @@ test('prepared iOS publication explicitly restores automatic/full release while 
   f.ctx.preparation = {
     status: 'prepared',
     inputDigest: (await loadStoreContent(f.ctx)).inputDigest,
+    observation: { remote: { target: { id: 'version-2' } } },
   };
   f.ctx.session = async () => ({
     cfg: { appId: '123', bundleId: 'com.example.app' },

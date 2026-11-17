@@ -49,10 +49,19 @@ intent, without transferring successful validation or build evidence.
 #### Scenario: Same prepared draft and content
 - **WHEN** the predecessor has only fully confirmed prepared iOS content and the
   newer higher-build task binds the same app/version/config/content digest/draft ID
-- **THEN** ownership can transfer with append-only revocation of the predecessor
+- **THEN** a fresh read under target and predecessor locks must confirm that exact
+  provider draft identity and content before ownership can transfer with
+  append-only revocation of the predecessor
   and the new task's normal source/evidence/provider gates still apply
 
 #### Scenario: Ambiguous or changed preparation
 - **WHEN** content or draft identity differs, preparation is incomplete or a binary
   intent already exists
-- **THEN** this prepared-draft handoff refuses without repeating provider writes
+- **THEN** this prepared-draft handoff refuses without revoking the predecessor
+  or repeating provider writes
+
+#### Scenario: Provider changes after saved preparation
+- **WHEN** the provider replaces a draft with identical content or changes its
+  content after the saved preparation/proposal snapshots
+- **THEN** the fresh handoff read refuses before predecessor revocation or upload
+  intent, and upload/publication independently requires the prepared draft identity

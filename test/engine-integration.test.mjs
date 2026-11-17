@@ -8,6 +8,7 @@ import { createPlan } from '../src/plan.mjs';
 import { runCommand } from '../src/command.mjs';
 import { digest, loadState, releasePath, saveState } from '../src/state.mjs';
 import { main } from '../src/cli.mjs';
+import { loadStoreContent } from '../src/store-content.mjs';
 import { createRequest, dispatchRequest, runRequest, readRequestStatus, inspectDispatchRequests } from '../src/executor.mjs';
 import { workerMain } from '../src/worker.mjs';
 
@@ -530,10 +531,33 @@ test('upload stage fences content writes before provider intent', async t => {
 
 
 test('confirmed same-content draft with no binary intent can transfer to a newer accepted descendant', async t => {
-  for (const variant of ['same', 'changed-content', 'changed-draft', 'unknown-step', 'upload-intent', 'not-prepared']) {
+  for (const variant of ['same', 'changed-content', 'changed-draft', 'unknown-step', 'upload-intent', 'not-prepared', 'live-draft', 'live-content']) {
     const f = await fixture(t, ['ios']);
+    f.config.stores = { ios: { contentPath: 'content.json' } };
+    const manifest = { schemaVersion: 1, platform: 'ios', version: '1.0.0',
+      locales: [{ locale: 'en-US', fields: { whatsNew: 'Reviewed notes' }, screenshots: [] }] };
+    await writeFile(join(f.repo, 'content.json'), JSON.stringify(manifest));
+    await runCommand('git', ['add', '.'], { cwd: f.repo });
+    await runCommand('git', ['commit', '-qm', 'reviewed content'], { cwd: f.repo });
+    f.plan = await createPlan({ repo: f.repo, ref: 'HEAD', platforms: ['ios'], config: f.config });
+    f.state = () => loadState(releasePath(f.store, f.plan.id));
     const accepted = await acceptedIos(f);
-    const inputDigest = 'b'.repeat(64);
+    const inputDigest = (await loadStoreContent({ root: f.repo, platform: 'ios', plan: f.plan,
+      config: f.config, command: runCommand })).inputDigest;
+    let liveDraft = 'draft-1', liveNotes = 'Reviewed notes', providerReads = 0;
+    f.adapters.ios.contentSession = async () => ({
+      cfg: { appId: '123', bundleId: f.plan.appIds.ios },
+      async read() { providerReads++; return { data: { attributes: { bundleId: f.plan.appIds.ios } } }; },
+      async list(path) {
+        providerReads++;
+        if (path.includes('/appStoreVersions?')) return [{ id: liveDraft,
+          attributes: { versionString: '1.0.0', appStoreState: 'PREPARE_FOR_SUBMISSION' } }];
+        if (path.includes('/appStoreVersionLocalizations?')) return [{ id: 'en',
+          attributes: { locale: 'en-US', whatsNew: liveNotes } }];
+        return [];
+      },
+      async write() { assert.fail('Draft continuity must be read-only'); },
+    });
     accepted.storePreparation = { ios: { inputDigest, status: 'prepared',
       steps: { draft: { state: 'confirmed' }, 'text:en': { state: 'confirmed' } },
       observation: { matches: true, remote: { target: { id: 'draft-1' } } } } };
@@ -557,6 +581,8 @@ test('confirmed same-content draft with no binary intent can transfer to a newer
       status: 'planned', steps: {}, proposal: { before: { target: { id: variant === 'changed-draft' ? 'draft-2' : 'draft-1' } } } } };
     await saveState(releasePath(f.store, plan.id), next);
     boundedAdapter(f);
+    if (variant === 'live-draft') liveDraft = 'replacement-same-content';
+    if (variant === 'live-content') liveNotes = 'External edit after saved snapshots';
     const result = await f.runner().execute(plan, { uploadOnly: true });
     const old = await f.state();
     if (variant === 'same') {
@@ -565,6 +591,8 @@ test('confirmed same-content draft with no binary intent can transfer to a newer
       assert.equal(old.supersededBy.ios.releaseId, plan.id);
       assert.equal(result.supersessions[0].reason, 'confirmed-prepared-draft-no-upload');
       assert.equal(result.supersessions[0].preparedContent.versionId, 'draft-1');
+      assert.ok(providerReads > 0);
+      assert.ok(result.supersessions[0].preparedContent.observedAt);
       assert.deepEqual(old.storePreparation, accepted.storePreparation);
       assert.equal(old.checkpoints.ios?.['ios-upload'], undefined);
       assert.equal((await f.runner().execute(f.plan)).outcomes.ios.state, 'blocked');
@@ -572,6 +600,9 @@ test('confirmed same-content draft with no binary intent can transfer to a newer
       assert.equal(result.outcomes.ios.state, 'blocked', variant);
       assert.equal(old.supersededBy, undefined, variant);
       assert.equal(f.calls.includes('upload-ios'), false, variant);
+      assert.deepEqual(old.storePreparation, accepted.storePreparation, variant);
+      assert.equal(result.checkpoints.ios?.['ios-upload'], undefined, variant);
+      if (variant.startsWith('live-')) assert.ok(providerReads > 0);
     }
     assert.equal(f.calls.includes('publish-ios'), false);
   }

@@ -9,6 +9,7 @@ import {
   prepareStoreContent,
   uploadAppleParts,
   verifyPreparedPlayContent,
+  verifyPreparedAppleContent,
 } from './store-content.mjs';
 import { digest } from './state.mjs';
 import { main } from './cli.mjs';
@@ -563,4 +564,18 @@ test('repairing initial keyless login failure can retry content apply without an
   const result=await f.apply();
   assert.equal(result.status,'prepared');
   assert.equal(f.writes.filter(x=>x.method==='POST'&&x.path==='edits').length,1);
+});
+
+test('prepared Apple verifier refuses a replaced same-content draft and content drift', async t => {
+  for (const variant of ['draft', 'content']) {
+    const f = await fixture(t, 'ios', { screenshots: false });
+    await f.plan();
+    await f.apply();
+    await verifyPreparedAppleContent(f.ctx);
+    const before = f.writes.length;
+    if (variant === 'draft') f.remote.versions[0].id = 'replacement-same-content';
+    else f.remote.locales[0].attributes.description = 'External replacement';
+    await assert.rejects(verifyPreparedAppleContent(f.ctx), /identity changed|listing or screenshots changed/);
+    assert.equal(f.writes.length, before);
+  }
 });

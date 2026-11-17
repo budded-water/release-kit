@@ -751,7 +751,25 @@ export async function verifyPreparedAppleContent(ctx) {
   const input = await loadStoreContent(ctx);
   if (ctx.preparation?.status !== 'prepared' || ctx.preparation.inputDigest !== input.inputDigest)
     fail('iOS content preparation is missing or differs from the publication inputs.');
+  return matchingAppleDraft(ctx, input, ctx.preparation.observation?.remote?.target?.id);
+}
+
+async function matchingAppleDraft(ctx, input, versionId) {
+  if (typeof versionId !== 'string' || !versionId)
+    fail('Prepared iOS draft identity is missing; observe and reconcile preparation.');
   const api = await (ctx.session ?? contentSession)(ctx);
-  if (!matches(input.manifest, await appleSnapshot(api, ctx.plan.version)))
+  const remote = await appleSnapshot(api, ctx.plan.version);
+  if (remote.target?.id !== versionId)
+    fail('Prepared iOS draft identity changed before publication.');
+  if (!matches(input.manifest, remote))
     fail('Prepared iOS listing or screenshots changed before publication.');
+  return { versionId, inputDigest: input.inputDigest, observedAt: new Date().toISOString() };
+}
+
+// Used under target/predecessor ownership before revoking a confirmed draft owner.
+export async function verifyAppleDraftContinuity(ctx, { inputDigest, versionId }) {
+  const input = await loadStoreContent(ctx);
+  if (ctx.platform !== 'ios' || input.inputDigest !== inputDigest)
+    fail('Prepared iOS draft content differs from the successor inputs.');
+  return matchingAppleDraft(ctx, input, versionId);
 }
