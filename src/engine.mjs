@@ -566,6 +566,9 @@ export function createRunner({
         )
           return false;
       }
+      if (preparedDraftProof)
+        await verifyProductionSource(state, directory, platform,
+          checkoutDirectory(state, directory, platform), 'prepared-draft-handoff');
       const record = {
         platform,
         previousReleaseId: owner.id,

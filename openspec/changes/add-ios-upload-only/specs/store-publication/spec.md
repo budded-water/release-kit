@@ -50,7 +50,8 @@ intent, without transferring successful validation or build evidence.
 - **WHEN** the predecessor has only fully confirmed prepared iOS content and the
   newer higher-build task binds the same app/version/config/content digest/draft ID
 - **THEN** a fresh read under target and predecessor locks must confirm that exact
-  provider draft identity and content before ownership can transfer with
+  provider draft identity and content, then revalidate current default source
+  before ownership can transfer with
   append-only revocation of the predecessor
   and the new task's normal source/evidence/provider gates still apply
 
@@ -65,3 +66,7 @@ intent, without transferring successful validation or build evidence.
   content after the saved preparation/proposal snapshots
 - **THEN** the fresh handoff read refuses before predecessor revocation or upload
   intent, and upload/publication independently requires the prepared draft identity
+
+#### Scenario: Default source advances during continuity reads
+- **WHEN** the default source advances while the fresh provider continuity read is pending
+- **THEN** source revalidation refuses before predecessor revocation or upload intent

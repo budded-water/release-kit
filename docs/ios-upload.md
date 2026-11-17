@@ -64,7 +64,9 @@ The new source's separately reviewed content proposal must bind the same input
 digest and exact draft ID. Changed content/drafts, partial or unknown preparation,
 upload/review intents and conflicting target ownership remain blocked. Before
 revoking the predecessor, a fresh read under both locks must confirm the exact
-provider draft ID and content. The transfer records that observation time. A
+provider draft ID and content, then revalidate the successor against the current
+default source before any predecessor revocation. The transfer records that
+observation time. A
 provider replacement with identical content still blocks the handoff.
 
 This uses the existing target and predecessor locks and append-only supersession

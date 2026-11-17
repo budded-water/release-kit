@@ -45,7 +45,8 @@ old preparation is fully confirmed, its readback matches, no binary intent exist
 and a new content proposal binds the same digest/draft. Retain both artifacts and
 all original preparation evidence. Under the target and predecessor locks, read
 the provider again and require the exact draft ID and content before recording
-the transfer or revoking the old task. Record the fresh observation time; saved
+the transfer or revoking the old task. Revalidate the current default source
+after those reads and before revocation. Record the fresh observation time; saved
 snapshots alone are insufficient. Upload/publication rechecks draft identity and
 content at its provider boundary; missing historical identity fails closed.
 Normal current-source, higher-build and provider snapshot checks remain required.

@@ -1,4 +1,6 @@
 import test from 'node:test';
+import { generateKeyPairSync } from 'node:crypto';
+import { uploadStore } from '../src/stores.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, realpath, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -531,7 +533,7 @@ test('upload stage fences content writes before provider intent', async t => {
 
 
 test('confirmed same-content draft with no binary intent can transfer to a newer accepted descendant', async t => {
-  for (const variant of ['same', 'changed-content', 'changed-draft', 'unknown-step', 'upload-intent', 'not-prepared', 'live-draft', 'live-content']) {
+  for (const variant of ['same', 'changed-content', 'changed-draft', 'unknown-step', 'upload-intent', 'not-prepared', 'live-draft', 'live-content', 'source-during-read']) {
     const f = await fixture(t, ['ios']);
     f.config.stores = { ios: { contentPath: 'content.json' } };
     const manifest = { schemaVersion: 1, platform: 'ios', version: '1.0.0',
@@ -544,10 +546,19 @@ test('confirmed same-content draft with no binary intent can transfer to a newer
     const accepted = await acceptedIos(f);
     const inputDigest = (await loadStoreContent({ root: f.repo, platform: 'ios', plan: f.plan,
       config: f.config, command: runCommand })).inputDigest;
-    let liveDraft = 'draft-1', liveNotes = 'Reviewed notes', providerReads = 0;
+    let liveDraft = 'draft-1', liveNotes = 'Reviewed notes', providerReads = 0, advanceSource = false;
     f.adapters.ios.contentSession = async () => ({
       cfg: { appId: '123', bundleId: f.plan.appIds.ios },
-      async read() { providerReads++; return { data: { attributes: { bundleId: f.plan.appIds.ios } } }; },
+      async read() {
+        providerReads++;
+        if (advanceSource) {
+          advanceSource = false;
+          await writeFile(join(f.repo, 'later.txt'), 'new default source during provider read');
+          await runCommand('git', ['add', '.'], { cwd: f.repo });
+          await runCommand('git', ['commit', '-qm', 'later default source'], { cwd: f.repo });
+        }
+        return { data: { attributes: { bundleId: f.plan.appIds.ios } } };
+      },
       async list(path) {
         providerReads++;
         if (path.includes('/appStoreVersions?')) return [{ id: liveDraft,
@@ -583,6 +594,7 @@ test('confirmed same-content draft with no binary intent can transfer to a newer
     boundedAdapter(f);
     if (variant === 'live-draft') liveDraft = 'replacement-same-content';
     if (variant === 'live-content') liveNotes = 'External edit after saved snapshots';
+    if (variant === 'source-during-read') advanceSource = true;
     const result = await f.runner().execute(plan, { uploadOnly: true });
     const old = await f.state();
     if (variant === 'same') {
@@ -602,8 +614,146 @@ test('confirmed same-content draft with no binary intent can transfer to a newer
       assert.equal(f.calls.includes('upload-ios'), false, variant);
       assert.deepEqual(old.storePreparation, accepted.storePreparation, variant);
       assert.equal(result.checkpoints.ios?.['ios-upload'], undefined, variant);
-      if (variant.startsWith('live-')) assert.ok(providerReads > 0);
+      if (variant.startsWith('live-') || variant === 'source-during-read') assert.ok(providerReads > 0);
+      assert.equal(JSON.parse(await readFile(join(f.store, 'targets', `${key}.json`), 'utf8')).id, f.plan.id);
     }
     assert.equal(f.calls.includes('publish-ios'), false);
+  }
+});
+
+test('real prepared-draft apply and bounded upload retain one draft and separate provider effects', async t => {
+  for (const driftAfterOwnership of [false, true]) {
+    const f = await fixture(t, ['ios']);
+    f.config.stores = { ios: { contentPath: 'content.json', metadataPath: 'metadata',
+      appId: '123', bundleId: 'example.synthetic', apiKeyPathEnv: 'SYNTHETIC_STORE_KEY' } };
+    await mkdir(join(f.repo, 'metadata'));
+    await writeFile(join(f.repo, 'metadata', 'README.txt'), 'Synthetic saved listing');
+    await writeFile(join(f.repo, 'content.json'), JSON.stringify({ schemaVersion: 1,
+      platform: 'ios', version: '1.0.0', locales: [{ locale: 'en-US',
+        fields: { whatsNew: 'Reviewed notes' }, screenshots: [] }] }));
+    await runCommand('git', ['add', '.'], { cwd: f.repo });
+    await runCommand('git', ['commit', '-qm', 'synthetic listing inputs'], { cwd: f.repo });
+    f.plan = await createPlan({ repo: f.repo, ref: 'HEAD', platforms: ['ios'], config: f.config });
+    const keyPath = join(f.base, 'synthetic-key.json');
+    const key = generateKeyPairSync('ec', { namedCurve: 'prime256v1',
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' } }).privateKey;
+    await writeFile(keyPath, JSON.stringify({ key_id: 'synthetic', issuer_id: 'synthetic', key }));
+    f.options.environment = { ...process.env, SYNTHETIC_STORE_KEY: keyPath };
+    const remote = { notes: 'Old notes', uploaded: false };
+    const version = () => ({ id: 'retained-draft', type: 'appStoreVersions', attributes: {
+      versionString: '1.0.0', appStoreState: 'PREPARE_FOR_SUBMISSION', releaseType: 'MANUAL',
+    }, relationships: { build: { data: null } } });
+    const locale = () => ({ id: 'en', attributes: { locale: 'en-US', whatsNew: remote.notes,
+      description: 'Saved description', keywords: 'synthetic', supportUrl: 'https://example.invalid' } });
+    const sets = [{ id: 'saved-set', attributes: { screenshotDisplayType: 'APP_IPHONE_67' } }];
+    const images = [{ id: 'saved-image', attributes: { assetDeliveryState: { state: 'COMPLETE' } } }];
+    let successor, drifted = false;
+    const effects = [], reads = [];
+    const targetKey = digest({ appId: 'example.synthetic', platform: 'ios', destination: 'app-store' });
+    const targetPath = join(f.store, 'targets', `${targetKey}.json`);
+    const api = {
+      cfg: { appId: '123', bundleId: 'example.synthetic' },
+      async read(path) {
+        assert.equal(path, '/v1/apps/123');
+        return { data: { attributes: { bundleId: 'example.synthetic' } } };
+      },
+      async list(path) {
+        reads.push(path);
+        if (driftAfterOwnership && successor && !drifted &&
+            JSON.parse(await readFile(targetPath, 'utf8')).id === successor.id) {
+          remote.notes = 'External edit after ownership';
+          drifted = true;
+        }
+        if (path.includes('/appStoreVersions?')) return [version()];
+        if (path.includes('/appStoreVersionLocalizations?')) return [locale()];
+        if (path.includes('/appInfos?')) return [];
+        if (path.includes('/appScreenshotSets?')) return sets;
+        if (path.includes('/appScreenshots?')) return images;
+        throw Error(`Unexpected content read ${path}`);
+      },
+      async write(method, path, body) {
+        assert.equal(method, 'PATCH');
+        assert.equal(path, '/v1/appStoreVersionLocalizations/en');
+        const owner = JSON.parse(await readFile(targetPath, 'utf8'));
+        const state = await loadState(releasePath(f.store, owner.id));
+        assert.equal(state.storePreparation.ios.steps['text:en-US'].state, 'intent');
+        effects.push('listing-text');
+        remote.notes = body.data.attributes.whatsNew;
+        return null;
+      },
+    };
+    f.adapters.ios.contentSession = async () => api;
+    const provider = async (url, options) => {
+      assert.ok(!options.method || options.method === 'GET', 'upload must not write listing, select a build or submit review');
+      reads.push(url);
+      const ok = (data, included = []) => ({ ok: true, status: 200, json: async () => ({ data, included }) });
+      if (url.endsWith('/v1/apps/123')) return ok({ attributes: { bundleId: 'example.synthetic' } });
+      if (url.includes('/appStoreVersions?')) return ok([version()]);
+      if (url.includes('/appStoreVersionLocalizations?')) return ok([locale()]);
+      if (url.includes('/appScreenshotSets?')) return ok(sets);
+      if (url.includes('/appScreenshots?')) return ok(images);
+      if (url.endsWith('/appStoreReviewDetail')) return ok({ attributes: { contactFirstName: 'Synthetic',
+        contactLastName: 'Contact', contactPhone: '000', contactEmail: 'test@example.invalid', demoAccountRequired: false } });
+      if (url.includes('/buildUploads?')) return ok([]);
+      if (url.includes('/v1/builds?')) return ok(remote.uploaded ? [{ id: 'uploaded-build', type: 'builds',
+        attributes: { version: '2', processingState: 'VALID' },
+        relationships: { preReleaseVersion: { data: { id: 'pre-version' } } } }] : [],
+        [{ id: 'pre-version', type: 'preReleaseVersions', attributes: { version: '1.0.0', platform: 'IOS' } }]);
+      throw Error(`Unexpected upload read ${url}`);
+    };
+    f.options.command = async (binary, args, options) => {
+      if (binary !== 'fastlane') return runCommand(binary, args, options);
+      assert.deepEqual(args.slice(0, 2), ['pilot', 'upload']);
+      const state = await loadState(releasePath(f.store, successor.id));
+      assert.equal(state.storePreparation.ios.status, 'prepared');
+      assert.equal(state.checkpoints.ios['ios-upload'].state, 'intent');
+      assert.equal(state.checkpoints.ios['ios-review'], undefined);
+      effects.push('binary-upload');
+      remote.uploaded = true;
+      return { code: 0 };
+    };
+    f.adapters.ios.upload = ctx => uploadStore({ ...ctx, fetch: provider, session: async () => api });
+    await acceptedIos(f);
+    const oldProposal = await f.runner().prepareContent(f.plan);
+    await f.runner().prepareContent(f.plan, { mode: 'apply', approval: oldProposal.approval });
+    const predecessor = await loadState(releasePath(f.store, f.plan.id));
+    assert.equal(predecessor.storePreparation.ios.status, 'prepared');
+    assert.equal(predecessor.storePreparation.ios.steps['text:en-US'].state, 'confirmed');
+    await writeFile(join(f.repo, 'new.txt'), 'current higher-build descendant');
+    await runCommand('git', ['add', '.'], { cwd: f.repo });
+    await runCommand('git', ['commit', '-qm', 'synthetic descendant'], { cwd: f.repo });
+    successor = await createPlan({ repo: f.repo, ref: 'HEAD', platforms: ['ios'], config: f.config });
+    const build = f.adapters.ios.build;
+    f.adapters.ios.build = async ctx => ({ ...await build(ctx), buildNumber: '2' });
+    const built = await f.runner().execute(successor);
+    await f.runner().execute(successor, { acceptance: await f.receipts(built) });
+    const proposal = await f.runner().prepareContent(successor);
+    if (driftAfterOwnership)
+      await assert.rejects(f.runner().prepareContent(successor, { mode: 'apply', approval: proposal.approval }), /Remote content changed/);
+    else {
+      const prepared = await f.runner().prepareContent(successor, { mode: 'apply', approval: proposal.approval });
+      assert.equal(prepared.status, 'prepared');
+      assert.equal(prepared.observation.remote.target.id, 'retained-draft');
+    }
+    const result = await f.runner().execute(successor, { uploadOnly: true });
+    const old = await loadState(releasePath(f.store, f.plan.id));
+    assert.deepEqual(old.storePreparation, predecessor.storePreparation);
+    assert.equal(old.supersededBy.ios.releaseId, successor.id);
+    assert.equal(old.checkpoints.ios?.['ios-upload'], undefined);
+    assert.equal(result.publicationRequested, false);
+    assert.equal(result.checkpoints.ios?.['ios-review'], undefined);
+    assert.ok(reads.length > 0);
+    if (driftAfterOwnership) {
+      assert.equal(result.outcomes.ios.state, 'blocked');
+      assert.equal(result.checkpoints.ios?.['ios-upload'], undefined);
+      assert.deepEqual(effects, ['listing-text']);
+      assert.equal(drifted, true);
+    } else {
+      assert.equal(result.outcomes.ios.state, 'uploaded', JSON.stringify(result.outcomes.ios));
+      assert.equal(result.checkpoints.ios['ios-upload'].buildId, 'uploaded-build');
+      assert.equal(result.supersessions[0].preparedContent.versionId, 'retained-draft');
+      assert.deepEqual(effects, ['listing-text', 'binary-upload']);
+    }
   }
 });
