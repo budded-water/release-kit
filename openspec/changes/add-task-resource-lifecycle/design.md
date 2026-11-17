@@ -159,9 +159,21 @@ must produce an honest failure, not a completeness or reservation guarantee.
 Never exceed the policy by silently treating protected resources as disposable.
 
 ### Settlement, after children and evidence settle
-First record the task outcome and durable evidence integrity. Before relinquishing
-task activity, append the cache disposition and any pending resource work. Release
-owned sessions while their ownership is still held. Only after task/release/UI locks
+Attempt to record the task outcome and durable evidence integrity. Regardless of
+result recording, evidence verification or pending-disposition write failure, a
+bounded finalization path must attempt ownership-verified child/session teardown
+while its ownership is still held. Preserve the original task/persistence error and
+report cleanup errors separately; never claim a successful settlement after a
+failed prerequisite. Disk-cache reclamation remains blocked when those prerequisites
+fail, even if session teardown succeeds.
+
+Before relinquishing task activity, attempt to append the cache disposition and
+any pending resource work. If recording fails, leave disk resources intact; the
+already durable admission/resource identity requires reconciliation on next entry.
+Release the current owned lease only when child/session settlement is proven; keep
+the existing fence when ownership or cleanup is uncertain. Successful session
+teardown does not clear missing-evidence or ledger-reconciliation protection.
+Only after task/release/UI locks
 are released may the wrapper atomically transition its activity into maintenance.
 If other activity prevents exclusive maintenance, retain pending work and release
 only the current owned activity; the next admission retries assessment.
@@ -286,9 +298,11 @@ flowchart TD
     handoff --> register["Register resource generation before allocation"]
     register --> execute["Run isolated checks and native work"]
     execute --> evidence["Persist outcome and verify durable materials"]
-    evidence --> settle["Settle children and release owned sessions"]
+    evidence -->|Success or failure| settle["Always attempt bounded owned-session finalization"]
     settle --> pending["Persist pending cache disposition"]
-    pending --> taskUnlock["Release task locks and attempt maintenance handoff"]
+    pending --> prerequisites{"Evidence, ledger and child settlement verified?"}
+    prerequisites -->|No| preserveFailure["Preserve error and caches; retain uncertain-owner fence"]
+    prerequisites -->|Yes| taskUnlock["Release task locks and attempt maintenance handoff"]
     taskUnlock --> exclusive{"Exclusive maintenance available?"}
     exclusive -->|Yes| reconcile
     exclusive -->|No| defer["Leave pending work for next admission"]

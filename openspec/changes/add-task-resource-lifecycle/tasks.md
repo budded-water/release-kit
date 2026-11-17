@@ -30,6 +30,7 @@ deletion authorization, installed adoption or runtime acceptance.
 - [ ] Use real temporary files, durable event writes and separate OS processes to test competing admission, maintenance transitions and reservation accounting.
 - [ ] Inject crashes before/after registration, intent, reuse revocation, partial deletion, deletion completion and admission/settlement handoff.
 - [ ] Test stale owners, unknown children, cancellation, ledger corruption/ENOSPC, interrupted completion writes and missing/replaced generations.
+- [ ] Inject task-result/evidence/pending-disposition ENOSPC or verification failure before teardown; prove bounded owned-session cleanup still runs, the original error survives, disk resources stay intact and uncertain owners retain their fences.
 - [ ] Test cross-release/historical/relative references, legacy policy, symlink/ancestor replacement, mount/link ambiguity and evidence preservation.
 - [ ] Test resume after reclamation and unchanged native-build/upload/submission/publication idempotency; no provider writes during collection.
 - [ ] Test exact API/CLI dry-run/read-only behavior, bounded reports, secret omission, old-control refusal and safe disable/rollback.

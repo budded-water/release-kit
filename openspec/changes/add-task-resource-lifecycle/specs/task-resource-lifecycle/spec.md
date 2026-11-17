@@ -68,6 +68,12 @@ attempt eligible reclamation after execution, with next-entry recovery for misse
 - **WHEN** owned child processes cannot be confirmed settled
 - **THEN** existing ownership fences remain and destructive collection does not proceed
 
+#### Scenario: Evidence or settlement recording fails
+- **WHEN** task-result recording, evidence verification or pending-disposition persistence fails before session release
+- **THEN** bounded ownership-verified child/session teardown is still attempted while ownership is held
+- **AND** the original error is retained, disk resources remain protected and no successful settlement is reported
+- **AND** ownership fences remain where child/session settlement is uncertain, while a proven-safe owned lease can be released without clearing evidence or ledger protection
+
 ### Requirement: Reference-safe bounded reclamation
 The system SHALL delete only registered rebuildable resources cleared by fresh complete
 ownership, source, reconstruction, historical-reference and filesystem-identity checks under maintenance.
