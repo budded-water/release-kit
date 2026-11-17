@@ -1,8 +1,10 @@
 # Design: task resource lifecycle
 
 ## 1. Status and existing contracts
-Status: core implementation candidate; consumer integration and installed acceptance
-remain separately gated in [tasks](tasks.md). Documentation alone activates nothing.
+Status: core and App consumer source implemented; installed acceptance and the
+remaining verification gates stay open in [tasks](tasks.md). Documentation alone
+activates nothing. Consumer-owned documentation defines its declared leaves,
+dedicated sessions and stable bootstrap adoption; these are not core defaults.
 The accepted [storage specification](../../specs/release-storage/spec.md)
 and [storage reader guide](../../../docs/release-storage.md) describe bounded,
 non-atomic observations and non-executable previews. Their conservative historical

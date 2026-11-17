@@ -33,13 +33,13 @@ proposal/schema validation alone never authorizes deletion.
 - [ ] Test stale owners, unknown children, cancellation, ledger corruption/ENOSPC, interrupted completion writes and missing/replaced generations.
 - [ ] Inject task-result/evidence/pending-disposition ENOSPC or verification failure before teardown; prove bounded owned-session cleanup still runs, the original error survives, disk resources stay intact and uncertain owners retain their fences.
 - [ ] Test cross-release/historical/relative references, legacy policy, symlink/ancestor replacement, mount/link ambiguity and evidence preservation.
-- [ ] Test resume after reclamation and unchanged native-build/upload/submission/publication idempotency; no provider writes during collection.
+- [x] Test resume after reclamation and unchanged native-build/upload/submission/publication idempotency; no provider writes during collection. Synthetic providers verify checkpoint preservation; real native/provider acceptance remains in rollout.
 - [ ] Test exact API/CLI dry-run/read-only behavior, bounded reports, secret omission, old-control refusal and safe disable/rollback.
 - [ ] Exercise two synthetic project adapters and repeated generations, including protected-overage and interrupted-recovery cases.
-- [ ] Run required repository checks, packed pnpm/npm consumer verification and independent final-head review; inspect behavioral test quality for implementation.
+- [x] Run required repository checks, packed pnpm/npm consumer verification and independent final-head review; inspect behavioral test quality for implementation.
 
 ## 5. Consumer integration and authorized rollout
-- [ ] In a separate consumer PR, pin the reviewed core and add trusted App cache/reference/session policy plus stable bootstrap admission and fencing.
+- [x] In a separate consumer PR, pin the reviewed core and add trusted App cache/reference/session policy plus stable bootstrap admission and fencing. Source adoption does not upgrade or activate the installed control.
 - [ ] Synchronize consumer release/UI-eval contracts and installed companion provenance; retain exact source/native/evidence gates.
 - [ ] Obtain concrete authorization for installed policy activation and any legacy deletion list; repository publication alone is insufficient.
 - [ ] Under managed maintenance, reconcile active requests/owners, preserve required inputs/history and verify the no-write classification first.
