@@ -8,6 +8,7 @@ import { runCommand } from './command.mjs';
 import { assertMaintenanceOwner } from './coordination.mjs';
 import { dedicatedRunnerLabel } from './runner-policy.mjs';
 import { createCleanupGuard } from './cleanup.mjs';
+import { assertResourceAdmission } from './resource-lifecycle.mjs';
 
 const SHA = /^[a-f0-9]{64}$/;
 const COMMIT = /^[a-f0-9]{40}$/;
@@ -1044,6 +1045,9 @@ export async function runRequest({
   worker,
   command = runCommand,
   signal,
+  resourceLifecycle,
+  resourceLease,
+  resourceSession,
 }) {
   const policy = normalizePolicy(inputPolicy);
   const cleanup = createCleanupGuard(policy.stateDirectory, command);
@@ -1056,6 +1060,16 @@ export async function runRequest({
   if (records.retirement) return status(stored, records);
   const identity = executor === 'github' ? workerIdentity(worker, policy, records.intent) : null;
   if (records.claim) return status(stored, records);
+  if (stored.value.operation !== 'executor-check' && resourceLifecycle && !resourceSession) {
+    const completed = await resourceLifecycle.run({ plan: stored.value.plan,
+      operation: stored.value.operation === 'validate' ? 'validate' : 'execute',
+      lease: resourceLease, pendingRequest: id,
+      execute: session => runRequest({ policy, id, executor, validate, execute, worker, command, signal,
+        resourceSession: session }) });
+    return { ...completed.result, resourceMaintenance: completed.maintenance };
+  }
+  if (stored.value.operation !== 'executor-check')
+    await assertResourceAdmission({ store: policy.stateDirectory, plan: stored.value.plan, session: resourceSession });
   interrupted(signal);
   if (typeof validate !== 'function' || typeof execute !== 'function')
     throw new Error('Dispatch execution requires validation and execution callbacks');
@@ -1085,7 +1099,7 @@ export async function runRequest({
   let result;
   try {
     interrupted(signal);
-    const outcome = await cleanup.run(() => execute(structuredClone(stored.value)));
+    const outcome = await cleanup.run(() => execute(structuredClone(stored.value), resourceSession));
     if (
       !object(outcome) ||
       !Number.isInteger(outcome.exitCode) ||
@@ -1158,6 +1172,8 @@ async function dispatchWithGuard({
   validate,
   execute,
   signal,
+  resourceLifecycle,
+  resourceLease,
   wait = (milliseconds, abortSignal) => delay(milliseconds, undefined, { signal: abortSignal }),
   command = runCommand,
 }, cleanup) {
@@ -1169,7 +1185,7 @@ async function dispatchWithGuard({
   if (records.claim || records.retirement) return status(stored, records);
   interrupted(signal);
   const local = () =>
-    runRequest({ policy, id, executor: 'local', validate, execute, signal, command });
+    runRequest({ policy, id, executor: 'local', validate, execute, signal, command, resourceLifecycle, resourceLease });
   if (!records.intent) {
     let available = null;
     if (policy.github.enabled) {
@@ -1241,6 +1257,11 @@ async function dispatchWithGuard({
       }
       records = await stateRecords(policy, stored);
     }
+  }
+  if (resourceLifecycle && records.intent) {
+    // The dispatcher must relinquish its activity before the worker can obtain
+    // exclusive maintenance. A pending request is not completed native work.
+    return { ...status(stored, records), resourceAdmission: 'worker-after-dispatcher-settlement' };
   }
   const deadline =
     Date.parse(records.intent.value.createdAt) + policy.github.startTimeoutSeconds * 1000;

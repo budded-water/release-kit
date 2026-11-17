@@ -142,6 +142,23 @@ async function participant(t, anchor, kind) {
   };
 }
 
+test('maintenance/activity handoff excludes a separate process and preserves its identity', async t => {
+  const { anchor } = await fixture(t);
+  const lease = await acquireActivity(anchor, { operation: 'managed handoff' });
+  const token = lease.owner.token;
+  const competitor = await participant(t, anchor, 'activity');
+  await lease.transition('maintenance');
+  assert.equal((await competitor.start()).code, 'COORDINATION_BUSY');
+  assert.equal((await inspectCoordination(anchor)).maintenance.token, token);
+  await lease.transition('activity');
+  assert.equal((await competitor.start()).type, 'acquired');
+  await assert.rejects(lease.transition('maintenance'), busy);
+  await competitor.release();
+  await lease.transition('maintenance');
+  await lease.release();
+  assert.equal((await inspectCoordination(anchor)).maintenance, null);
+});
+
 test('multiple shared activities coexist, block maintenance, and release only their own records', async (t) => {
   const { anchor } = await fixture(t);
   const first = await acquireActivity(anchor, { operation: 'dispatcher' });

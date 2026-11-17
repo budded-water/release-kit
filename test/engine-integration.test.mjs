@@ -13,6 +13,9 @@ import { main } from '../src/cli.mjs';
 import { loadStoreContent } from '../src/store-content.mjs';
 import { createRequest, dispatchRequest, runRequest, readRequestStatus, inspectDispatchRequests } from '../src/executor.mjs';
 import { workerMain } from '../src/worker.mjs';
+import { createResourceLifecycle } from '../src/resource-lifecycle.mjs';
+import { acquireActivity, acquireMaintenance } from '../src/coordination.mjs';
+import { executionHandlers } from '../src/execution.mjs';
 
 async function fixture(t, platforms = ['ios', 'android']) {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'release-engine-')));
@@ -96,6 +99,94 @@ async function fixture(t, platforms = ['ios', 'android']) {
 }
 
 const cleanupError = () => Object.assign(new Error('Synthetic unsettled process group'), { cleanupIncomplete: true });
+
+async function enableResourceLifecycle(f) {
+  const anchor = join(f.base, 'coordination');
+  await mkdir(anchor, { mode: 0o700 });
+  await mkdir(f.store, { mode: 0o700, recursive: true });
+  const adapter = { schemaVersion: 1, policy: 'd'.repeat(64),
+    caches: { compiler: { path: '.ui-eval/build/intermediates', stages: ['ui-eval'] } },
+    references: async () => [],
+    toolchain: async () => 'e'.repeat(64),
+    reconstructable: async ({ resource }) => ({ source: resource.source, toolchain: resource.toolchain, sourceClean: true,
+      inputsAvailable: true, recoveryIndependent: true }) };
+  const policy = { schemaVersion: 1, coordinationAnchor: anchor, cacheBudgetBytes: 8,
+    minimumFreeBytes: 1, phaseBytes: { validate: 1, execute: 1, content: 1 } };
+  const lifecycle = createResourceLifecycle({ stateDirectory: f.store, policy, adapter });
+  const lease = await acquireMaintenance(anchor, { operation: 'synthetic lifecycle activation' });
+  await lifecycle.activate({ lease });
+  await lease.release();
+  const evaluate = f.project.evaluateUI;
+  f.project.evaluateUI = async ctx => {
+    const cache = await ctx.resources.prepareCache('compiler', ctx.root);
+    await writeFile(join(cache, 'object.o'), '0123456789abcdef');
+    return evaluate(ctx);
+  };
+  return lifecycle;
+}
+
+test('activated engine refuses bypass and rebuilds reclaimed UI preparation without replaying publication', async t => {
+  const f = await fixture(t);
+  // Production histories record a repository URL, not a filesystem dependency
+  // outside the state root. Keep validation local; it never fetches this origin.
+  await runCommand('git', ['remote', 'set-url', 'origin', 'https://github.com/example/synthetic.git'], { cwd: f.repo });
+  f.plan = await createPlan({ repo: f.repo, ref: 'HEAD', platforms: ['ios', 'android'], config: f.config });
+  f.state = () => loadState(releasePath(f.store, f.plan.id));
+  const lifecycle = await enableResourceLifecycle(f);
+  await assert.rejects(f.runner().validate(f.plan, { ui: true }), { code: 'RESOURCE_ADMISSION' });
+  assert.equal(f.calls.length, 0);
+  f.options.resourceLifecycle = lifecycle;
+  const runner = f.runner();
+  const first = await runner.validate(f.plan, { ui: true });
+  assert.equal(first.uiValidation.state, 'passed');
+  assert.equal(runner.resourceMaintenance.outcome, 'complete', JSON.stringify(runner.resourceMaintenance));
+  const second = await f.runner().validate(f.plan, { ui: true });
+  assert.equal(second.uiValidation.state, 'passed');
+  assert.equal(f.calls.filter(call => call === 'ui').length, 2);
+  assert.equal(f.calls.filter(call => call === 'checks').length, 1);
+  assert.equal(f.calls.some(call => call.startsWith('build-') || call.startsWith('publish-')), false);
+  assert.equal((await f.state()).stages['ui-eval'].status, 'succeeded');
+});
+
+test('enabled dispatch releases its observer before one worker claims and validates under lifecycle admission', async t => {
+  const f = await fixture(t, ['ios']);
+  await runCommand('git', ['remote', 'set-url', 'origin', 'https://github.com/example/synthetic.git'], { cwd: f.repo });
+  f.plan = await createPlan({ repo: f.repo, ref: 'HEAD', platforms: ['ios'], config: f.config });
+  const lifecycle = await enableResourceLifecycle(f);
+  const policy = { schemaVersion: 1, repository: 'example/synthetic', controlRepository: f.repo,
+    releaseConfig: f.configPath, stateDirectory: f.store,
+    github: { enabled: true, workflow: 'release-local.yml', ref: 'main',
+      runnerName: 'synthetic-mac', runnerLabel: 'release-example', startTimeoutSeconds: 1, pollSeconds: 1 } };
+  const request = await createRequest({ policy, plan: f.plan, operation: 'validate', ui: true });
+  const handlers = executionHandlers({ policy, command: runCommand, localMain: main,
+    environment: process.env, project: f.project, platformAdapters: f.adapters });
+  const anchor = join(f.base, 'coordination');
+  const dispatcher = await acquireActivity(anchor, { operation: 'dispatcher' });
+  const scheduled = await dispatchRequest({ policy, id: request.id, mode: 'github', ...handlers,
+    resourceLifecycle: lifecycle, resourceLease: dispatcher,
+    github: { available: async () => ({ available: true, workflowSha: f.plan.source,
+      workflowDigest: 'b'.repeat(64), runnerId: '1' }), dispatch: async () => ({ runId: '1' }) } });
+  assert.equal(scheduled.state, 'pending');
+  assert.equal(scheduled.resourceAdmission, 'worker-after-dispatcher-settlement');
+  const worker = await acquireActivity(anchor, { operation: 'worker' });
+  const running = runRequest({ policy, id: request.id, executor: 'github', ...handlers,
+    resourceLifecycle: lifecycle, resourceLease: worker,
+    worker: { runnerName: policy.github.runnerName, repository: policy.repository,
+      workflowSha: f.plan.source, runId: '1', runAttempt: 1 } });
+  await dispatcher.release();
+  const result = await running;
+  assert.equal(result.state, 'completed');
+  assert.equal(result.result.exitCode, 0);
+  assert.equal(result.resourceMaintenance.outcome, 'complete', JSON.stringify(result.resourceMaintenance));
+  await worker.release();
+  const claimBefore = await readFile(join(f.store, 'dispatch', 'requests', request.id, 'claim.json'), 'utf8');
+  const repeated = await runRequest({ policy, id: request.id, executor: 'github', ...handlers,
+    worker: { runnerName: policy.github.runnerName, repository: policy.repository,
+      workflowSha: f.plan.source, runId: '1', runAttempt: 2 } });
+  assert.equal(repeated.state, 'completed');
+  assert.equal(await readFile(join(f.store, 'dispatch', 'requests', request.id, 'claim.json'), 'utf8'), claimBefore);
+  assert.equal(f.calls.filter(call => call === 'ui').length, 1);
+});
 
 test('run/resume preserves builds and submission checkpoints, and revokes failed replacement acceptance', async t => {
   const f = await fixture(t);

@@ -277,10 +277,10 @@ async function inventory(anchor) {
 }
 
 async function acquire(anchor, kind, { operation } = {}) {
-  const owner = makeOwner(kind, operation);
+  let owner = makeOwner(kind, operation);
   const identity = await anchorIdentity(anchor);
-  const path = join(anchor, kind === 'maintenance' ? MAINTENANCE : `activity-${owner.token}.json`);
-  const stat = await underGate(anchor, identity, async () => {
+  let path = join(anchor, kind === 'maintenance' ? MAINTENANCE : `activity-${owner.token}.json`);
+  let stat = await underGate(anchor, identity, async () => {
     const status = await inventory(anchor);
     if (status.maintenance)
       throw busy(`Maintenance owns coordination: ${status.maintenance.operation}`);
@@ -293,10 +293,38 @@ async function acquire(anchor, kind, { operation } = {}) {
     return lstat(path);
   });
   let released = false;
+  let retained = false;
   return {
-    owner,
+    get owner() { return owner; },
+    get retained() { return retained; },
+    retain() { retained = true; },
+    async transition(nextKind) {
+      if (released || retained || !['maintenance', 'activity'].includes(nextKind))
+        throw invalid('Cannot transition a released lease or unknown ownership kind');
+      if (owner.kind === nextKind) return;
+      await underGate(anchor, identity, async () => {
+        const current = await inventory(anchor);
+        const owners = [...current.activities, ...(current.maintenance ? [current.maintenance] : [])];
+        const own = owners.find(entry => entry.token === owner.token);
+        if (!own || !OWNER_KEYS.every(key => own[key] === owner[key]))
+          throw invalid('Coordination ownership changed during transition');
+        if (owners.length !== 1) throw busy('Exclusive transition requires the sole activity owner');
+        const next = Object.freeze({ ...owner, kind: nextKind });
+        const nextPath = join(anchor, nextKind === 'maintenance' ? MAINTENANCE : `activity-${owner.token}.json`);
+        // The admission gate hides the handoff. A crash between these durable
+        // operations leaves conflicting evidence and blocks every new admission.
+        await writeOwner(nextPath, next);
+        const nextStat = await lstat(nextPath);
+        await removeOwned(path, owner, stat);
+        owner = next;
+        path = nextPath;
+        stat = nextStat;
+      });
+    },
     async release() {
       if (released) return;
+      if (retained) throw Object.assign(invalid('Coordination ownership retained for explicit recovery'),
+        { cleanupIncomplete: true });
       await underGate(anchor, identity, async () => {
         if (released) return;
         await anchorIdentity(anchor, identity);
@@ -319,13 +347,21 @@ export async function acquireMaintenance(anchor, options) {
 
 /** A retirement append may run only in the process holding exclusive admission. */
 export async function assertMaintenanceOwner(anchor, owner) {
+  return assertCoordinationOwner(anchor, owner, 'maintenance');
+}
+
+/** Verify a live in-process lease; serialized lifecycle writes use this identity. */
+export async function assertCoordinationOwner(anchor, owner, kind = owner?.kind) {
   const identity = await anchorIdentity(anchor);
-  if (owner?.kind !== 'maintenance' || owner.pid !== process.pid || owner.host !== hostname())
-    throw invalid('Request reconciliation requires this process to own maintenance admission');
+  if (!['maintenance', 'activity'].includes(kind) || owner?.kind !== kind ||
+      owner.pid !== process.pid || owner.host !== hostname())
+    throw invalid('Operation requires this process to own coordination admission');
   await underGate(anchor, identity, async () => {
     const current = await inventory(anchor);
-    if (!current.maintenance || !OWNER_KEYS.every((key) => current.maintenance[key] === owner[key]))
-      throw invalid('Request reconciliation does not own current maintenance admission');
+    const observed = kind === 'maintenance' ? current.maintenance :
+      current.activities.find(entry => entry.token === owner.token);
+    if (!observed || !OWNER_KEYS.every((key) => observed[key] === owner[key]))
+      throw invalid('Operation does not own current coordination admission');
   });
 }
 

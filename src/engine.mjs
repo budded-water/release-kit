@@ -22,6 +22,8 @@ import { prepareStoreContent, verifyAppleDraftContinuity } from './store-content
 import { requireProject } from './project.mjs';
 import { createCleanupGuard } from './cleanup.mjs';
 import { runCommand } from './command.mjs';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { assertResourceAdmission } from './resource-lifecycle.mjs';
 
 const now = () => new Date().toISOString();
 function assertNativeWorkspace(directory) {
@@ -73,7 +75,12 @@ export function createRunner({
   project,
   environment = process.env,
   signal,
+  resourceLifecycle,
+  resourceLease,
+  resourceSession,
 }) {
+  const resourceContext = new AsyncLocalStorage();
+  let resourceMaintenance = null;
   const cleanup = createCleanupGuard(store, command);
   command = cleanup.command;
   const acquireLock = async (path) => {
@@ -109,6 +116,11 @@ export function createRunner({
     if (signal?.aborted) throw new Error('Release execution interrupted');
     const previous = state.stages[key];
     if (previous?.status === 'succeeded' && !repeat) return previous.output;
+    const resources = resourceContext.getStore();
+    if (resources && ['install-validation', 'checks', 'ui-eval'].includes(key))
+      await resources.checkCapacity('validate');
+    if (resources && /^(install|build)-(ios|android|harmony)$/.test(key))
+      await resources.checkCapacity('execute');
     if (sideEffect && previous && !reconcile)
       throw new Error(
         `${key} has an unresolved build attempt. Inspect its output and remote version allocation; use a new explicitly planned build attempt after reconciliation. Automatic rebuild is disabled.`,
@@ -203,7 +215,8 @@ export function createRunner({
       throw new Error('Artifact identity no longer matches the release record');
     return { ...artifact, ...fresh };
   }
-  const projectContext = (root, source) => ({ root, source, config, command, env, environment, signal });
+  const projectContext = (root, source) => ({ root, source, config, command, env, environment, signal,
+    ...(resourceContext.getStore() ? { resources: resourceContext.getStore() } : {}) });
   async function validateSource(state, directory) {
     const hooks = requireProject(project);
     // Explicit semantic identity covers trusted hook dependencies, not just their
@@ -225,8 +238,10 @@ export function createRunner({
     try {
       if (signal?.aborted) throw new Error('Release execution interrupted');
       const root = join(directory, 'validation');
+      if (resourceContext.getStore()) await resourceContext.getStore().checkCapacity('validate');
       await prepareCheckout({ repo, root, source: state.plan.source, command });
       const installationReused = policy !== null &&
+        (!resourceContext.getStore() || await resourceContext.getStore().reuseAvailable('install-validation')) &&
         state.stages['install-validation']?.status === 'succeeded' &&
         state.stages['install-validation'].output?.policy === policy;
       const checksReused = installationReused &&
@@ -279,6 +294,12 @@ export function createRunner({
   }
   async function validateUI(state, directory, root) {
     const hooks = requireProject(project);
+    if (state.stages['ui-eval']?.status === 'succeeded' && resourceContext.getStore() &&
+        !(await resourceContext.getStore().reuseAvailable('ui-eval'))) {
+      state.stages['ui-eval'] = { ...state.stages['ui-eval'], status: 'invalidated',
+        invalidatedAt: now(), reason: 'resource-cache-unavailable' };
+      await saveState(directory, state);
+    }
     await step(state, directory, 'ui-eval', async () => {
       const evidence = await hooks.evaluateUI(projectContext(root, state.plan.source));
       await assertCheckout(root, state.plan.source, command);
@@ -711,7 +732,16 @@ export function createRunner({
       throw error;
     }
   }
-  async function withRelease(plan, task) {
+  async function withRelease(plan, task, operation = 'execute') {
+    if (resourceSession) return resourceContext.run(resourceSession, () => admittedRelease(plan, task));
+    if (!resourceLifecycle) return admittedRelease(plan, task);
+    const completed = await resourceLifecycle.run({ plan, operation, lease: resourceLease,
+      execute: session => resourceContext.run(session, () => admittedRelease(plan, task)) });
+    resourceMaintenance = completed.maintenance;
+    return completed.result;
+  }
+  async function admittedRelease(plan, task) {
+    await assertResourceAdmission({ store, plan, session: resourceContext.getStore() });
     await cleanup.assertSafe();
     const directory = releasePath(store, plan.id);
     await privateDirectory(directory);
@@ -742,6 +772,7 @@ export function createRunner({
     return withRelease(plan, async (state, directory) => {
       const platform = plan.platforms[0];
       const root = join(directory, 'store-content-source');
+      if (resourceContext.getStore()) await resourceContext.getStore().checkCapacity('content');
       await prepareCheckout({ repo, root, source: plan.source, command });
       // A prepared edit/draft cannot be changed once publication has started.
       if (mode !== 'observe' && (state.stages[`publish-${platform}`] || state.stages[`upload-${platform}`]))
@@ -786,14 +817,14 @@ export function createRunner({
               !Object.keys(state.checkpoints[platform] ?? {}).length,
           });
       }
-    });
+    }, 'content');
   }
   async function validate(plan, { ui = false } = {}) {
     if (typeof ui !== 'boolean') throw new Error('UI validation selection must be boolean');
     return withRelease(plan, async (state, directory) => {
       await validateGates(state, directory, ui);
       return state;
-    });
+    }, 'validate');
   }
   async function execute(
     plan,
@@ -1219,5 +1250,6 @@ export function createRunner({
       await unlock();
     }
   }
-  return { execute, validate, status, observe, prepareContent };
+  return { execute, validate, status, observe, prepareContent,
+    get resourceMaintenance() { return resourceMaintenance; } };
 }
