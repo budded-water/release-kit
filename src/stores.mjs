@@ -753,8 +753,19 @@ async function prepareAppleReleasePolicy(ctx, token, versionId) {
   }
 }
 
+function appleDraftResource(versionId) {
+  return `${APPLE}/v1/appStoreVersions/${segment(versionId)}`;
+}
+
 function appleBuildRelationship(versionId) {
-  return `${APPLE}/v1/appStoreVersions/${segment(versionId)}/relationships/build`;
+  return `${appleDraftResource(versionId)}/relationships/build`;
+}
+
+function matchesAppleDraft(draft, versionId, version, state) {
+  return typeof state === 'string' && state.length > 0 &&
+    draft?.type === 'appStoreVersions' && draft.id === versionId &&
+    draft.attributes?.platform === 'IOS' && draft.attributes.versionString === version &&
+    (draft.attributes.appVersionState ?? draft.attributes.appStoreState) === state;
 }
 
 function matchesAppleBuild(linkage, buildId) {
@@ -782,8 +793,12 @@ async function publishApple(ctx, cfg, { uploadOnly = false } = {}) {
     const { versionId, buildId } = attachment;
     if (observed.versionId === versionId && observed.buildId === buildId &&
         matchesAppleBuild(observed.target?.relationships?.build?.data, buildId)) {
-      const linkage = await request(ctx, appleBuildRelationship(versionId), token);
-      if (matchesAppleBuild(linkage?.data, buildId)) return;
+      const draft = (await request(ctx, `${appleDraftResource(versionId)}?include=build`, token))?.data;
+      if (matchesAppleDraft(draft, versionId, ctx.artifact.version, observed.appleState) &&
+          matchesAppleBuild(draft.relationships?.build?.data, buildId)) {
+        const linkage = await request(ctx, appleBuildRelationship(versionId), token);
+        if (matchesAppleBuild(linkage?.data, buildId)) return;
+      }
     }
     throw new StoreError('The confirmed iOS attachment changed; inspect the draft before publication.');
   };
@@ -1429,13 +1444,11 @@ export async function attachStoreBuild(ctx, { versionId } = {}) {
       observed.target.attributes?.releaseType !== 'MANUAL' || !validBuild(observed.build))
     throw new StoreError('The exact manual draft and valid, unexpired uploaded build must be available.');
 
-  const draft = `${APPLE}/v1/appStoreVersions/${segment(versionId)}`;
+  const draft = appleDraftResource(versionId);
   const relationship = appleBuildRelationship(versionId);
   const readSelection = async () => {
     const version = (await request(ctx, `${draft}?include=build`, token))?.data;
-    if (version?.type !== 'appStoreVersions' || version.id !== versionId ||
-        version.attributes?.platform !== 'IOS' || version.attributes?.versionString !== artifact.version ||
-        (version.attributes.appVersionState ?? version.attributes.appStoreState) !== 'PREPARE_FOR_SUBMISSION' ||
+    if (!matchesAppleDraft(version, versionId, artifact.version, 'PREPARE_FOR_SUBMISSION') ||
         version.attributes.releaseType !== 'MANUAL')
       throw new StoreError('The selected iOS draft is no longer an editable manual draft.');
     const snapshot = version.relationships?.build?.data;
@@ -1512,13 +1525,23 @@ export async function statusStore(ctx) {
 
       const { unsubmittedUpload, ...status } = output;
       if (attachment.state !== 'attached' || proof.buildId !== attachment.buildId) return status;
-      if (proof.versionId === null) return output;
-      if (proof.versionId !== attachment.versionId) return status;
-      const linkage = await request(ctx, appleBuildRelationship(proof.versionId), token);
-      const agrees = proof.selectedBuildId === null
-        ? linkage?.data === null
-        : matchesAppleBuild(linkage?.data, attachment.buildId);
-      return agrees ? output : status;
+      if (proof.versionId !== null && proof.versionId !== attachment.versionId) return status;
+      const versionId = attachment.versionId;
+      let draft;
+      try {
+        draft = (await request(ctx, `${appleDraftResource(versionId)}?include=build`, token))?.data;
+      } catch (error) {
+        if (proof.versionId === null && error instanceof StoreError && error.status === 404) return output;
+        throw error;
+      }
+      if (proof.versionId === null ||
+          !matchesAppleDraft(draft, versionId, proof.version, 'PREPARE_FOR_SUBMISSION')) return status;
+      const agrees = linkage => proof.selectedBuildId === null
+        ? linkage === null
+        : matchesAppleBuild(linkage, attachment.buildId);
+      if (!agrees(draft.relationships?.build?.data)) return status;
+      const linkage = await request(ctx, appleBuildRelationship(versionId), token);
+      return agrees(linkage?.data) ? output : status;
     }
     const token = await googleToken(ctx, cfg);
     const observed = await observePlay(ctx, cfg, token);

@@ -612,12 +612,13 @@ async function attachFixture(t, { managed = false } = {}) {
   const state = () => loadState(releasePath(f.store, f.plan.id));
   const remote = { versionId: 'manual-draft', buildId: 'apple-build', selected: null,
     state: 'PREPARE_FOR_SUBMISSION', releaseType: 'MANUAL', processing: 'VALID', expired: false, relationshipMissing: false, snapshotSelected: undefined, linkageSelected: undefined,
+    inventoryMissing: false, draftDeleted: false, snapshotState: undefined,
     onPatch: null, onFreshBuild: null };
   const requests = [];
   const build = id => ({ id, type: 'builds', attributes: { version: '1', processingState: remote.processing, expired: remote.expired },
     relationships: { preReleaseVersion: { data: { id: 'pre-version', type: 'preReleaseVersions' } } } });
-  const draft = (selected = remote.selected) => ({ id: remote.versionId, type: 'appStoreVersions', attributes: {
-    versionString: '1.0.0', appVersionState: remote.state, releaseType: remote.releaseType, platform: 'IOS',
+  const draft = (selected = remote.selected, state = remote.state) => ({ id: remote.versionId, type: 'appStoreVersions', attributes: {
+    versionString: '1.0.0', appVersionState: state, releaseType: remote.releaseType, platform: 'IOS',
   }, relationships: { build: { data: selected ? { id: selected, type: 'builds' } : null } } });
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     const u = new URL(url), method = options.method ?? 'GET';
@@ -643,7 +644,8 @@ async function attachFixture(t, { managed = false } = {}) {
       case '/v1/apps/123': return Response.json({ data: { id: '123', type: 'apps', attributes: { bundleId: 'example.synthetic' } } });
       case '/v1/apps/123/appStoreVersions':
         assert.equal(u.searchParams.get('filter[platform]'), 'IOS');
-        return Response.json({ data: [draft()], included: remote.selected ? [build(remote.selected)] : [] });
+        return Response.json({ data: remote.inventoryMissing ? [] : [draft()],
+          included: remote.selected && !remote.inventoryMissing ? [build(remote.selected)] : [] });
       case '/v1/builds':
         assert.equal(u.searchParams.get('filter[app]'), '123');
         assert.equal(u.searchParams.get('filter[version]'), '1');
@@ -655,7 +657,8 @@ async function attachFixture(t, { managed = false } = {}) {
         return Response.json({ data: build(remote.buildId) });
       case '/v1/appStoreVersions/manual-draft':
         assert.equal(u.searchParams.get('include'), 'build');
-        return Response.json({ data: draft(remote.snapshotSelected) });
+        if (remote.draftDeleted) return new Response(null, { status: 404 });
+        return Response.json({ data: draft(remote.snapshotSelected, remote.snapshotState) });
       case '/v1/appStoreVersions/manual-draft/relationships/build':
         return Response.json(remote.relationshipMissing ? {} : { data: draft(remote.linkageSelected).relationships.build.data });
       default: throw new Error('Unexpected synthetic request');
@@ -784,7 +787,9 @@ test('attach honors both locks and only uses an existing managed admission', asy
 });
 
 test('attachment preserves the existing confirmed unsubmitted-upload handoff boundary', async t => {
-  for (const variant of ['confirmed', 'cleared', 'pending', 'pending-terminal', 'replacement-draft', 'stale-selection']) await t.test(variant, async t => {
+  const variants = ['confirmed', 'cleared', 'pending', 'pending-terminal', 'replacement-draft',
+    'stale-selection', 'stale-review-state', 'omitted-draft', 'deleted-draft'];
+  for (const variant of variants) await t.test(variant, async t => {
     const f = await attachFixture(t);
     const pending = variant.startsWith('pending');
     if (pending) f.remote.onPatch = () => new Response(null, { status: 204 });
@@ -792,7 +797,17 @@ test('attachment preserves the existing confirmed unsubmitted-upload handoff bou
     if (variant === 'replacement-draft') f.remote.versionId = 'other-draft';
     if (variant === 'cleared') f.remote.selected = null;
     if (variant === 'stale-selection') f.remote.linkageSelected = 'another-build';
-    const canHandOff = ['confirmed', 'cleared'].includes(variant);
+    if (variant === 'stale-review-state') f.remote.snapshotState = 'WAITING_FOR_REVIEW';
+    if (variant === 'omitted-draft') {
+      f.remote.inventoryMissing = true;
+      f.remote.selected = 'another-build';
+    }
+    if (variant === 'deleted-draft') {
+      f.remote.inventoryMissing = true;
+      f.remote.draftDeleted = true;
+      f.remote.selected = null;
+    }
+    const canHandOff = ['confirmed', 'cleared', 'deleted-draft'].includes(variant);
     f.adapters.ios.status = statusStore;
     if (variant === 'pending-terminal') {
       f.remote.processing = 'INVALID';
@@ -805,8 +820,12 @@ test('attachment preserves the existing confirmed unsubmitted-upload handoff bou
     const next = await createPlan({ repo: f.repo, ref: 'HEAD', platforms: ['ios'], config: f.config });
     const built = await f.runner().execute(next);
     await f.runner().execute(next, { acceptance: await f.receipts(built) });
+    const readsBefore = f.requests.length;
     const result = await f.runner().execute(next, { uploadOnly: true });
     const previous = await f.state();
+    if (f.remote.inventoryMissing)
+      assert.ok(f.requests.slice(readsBefore).some(request =>
+        request.method === 'GET' && request.path === '/v1/appStoreVersions/manual-draft'));
 
     if (canHandOff) {
       assert.equal(result.outcomes.ios.state, 'uploaded');

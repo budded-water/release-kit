@@ -99,11 +99,11 @@ upload-only iOS release to an explicit existing manual draft before review.
 #### Scenario: Reconciliation without another write
 - **WHEN** the same build is already selected or an earlier attachment attempt exists
 - **THEN** the runner only reconciles the recorded relationship; a missing or unknown result cannot authorize another PATCH
-- **AND** the runner blocks publication while attachment intent is unresolved, and the built-in iOS publisher confirms the saved draft/build relationship directly before proceeding
+- **AND** the runner blocks publication while attachment intent is unresolved, and the built-in iOS publisher confirms the draft state and saved build relationship directly before proceeding
 
 #### Scenario: Existing unsubmitted-upload handoff
 - **WHEN** a higher build requests an otherwise eligible unsubmitted-upload handoff
-- **THEN** a confirmed attachment permits that handoff only with fresh matching unsubmitted evidence for the saved build and direct confirmation of any surviving draft relationship
+- **THEN** a confirmed attachment permits that handoff only with fresh matching unsubmitted evidence for the saved build and a direct read confirming the saved draft remains pre-review with the expected relationship or confirming its absence
 - **AND** unresolved attachment intent blocks ownership transfer even with a saved terminal outcome
 
 #### Scenario: Explicit local scope

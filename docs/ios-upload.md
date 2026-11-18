@@ -89,11 +89,11 @@ Rerun `attach` with the same release and draft to reconcile an unknown result.
 A missing relationship cannot authorize another PATCH after intent. The journal
 preserves the upload receipt and original approval scope. Plain resume continues
 its prior upload-only behavior. Explicit full publication requires a confirmed attachment if this operation was
-attempted. The built-in iOS publisher verifies the recorded build through
-the draft relationship endpoint before proceeding. A confirmed attachment can
+attempted. The built-in iOS publisher verifies the draft state and the
+recorded build through independent draft and relationship reads. A confirmed attachment can
 use the existing unsubmitted-upload handoff when fresh provider evidence still
-matches the recorded build and independently confirms any surviving draft
-relationship. An unresolved attachment blocks ownership transfer, including
+matches the recorded build and independently confirms the recorded draft
+relationship or that the draft was deleted. An unresolved attachment blocks ownership transfer, including
 when an observation reports a terminal outcome. `attach` itself changes only the build linkage. It does not
 schedule work, run Fastlane, upload, change release settings or submit for review.
 
