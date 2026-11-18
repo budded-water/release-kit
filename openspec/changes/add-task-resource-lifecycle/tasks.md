@@ -40,7 +40,7 @@ proposal/schema validation alone never authorizes deletion.
 
 ## 5. Consumer integration and authorized rollout
 - [x] In a separate consumer PR, pin the reviewed core and add trusted App cache/reference/session policy plus stable bootstrap admission and fencing. Source adoption does not upgrade or activate the installed control.
-- [ ] Synchronize consumer release/UI-eval contracts and installed companion provenance; retain exact source/native/evidence gates.
+- [x] Synchronize consumer release/UI-eval contracts and installed companion provenance; retain exact source/native/evidence gates. Private copy/source receipts are retained separately; this closes provenance synchronization, not policy activation or post-reclamation native acceptance.
 - [ ] Obtain concrete authorization for installed policy activation and any legacy deletion list; repository publication alone is insufficient.
 - [ ] Under managed maintenance, reconcile active requests/owners, preserve required inputs/history and verify the no-write classification first.
 - [ ] Activate only declared new-generation intermediate resources and verify final packages, receipts and user-visible task outcomes remain usable.
