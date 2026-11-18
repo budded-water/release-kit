@@ -1,6 +1,6 @@
 import test from 'node:test';
 import { generateKeyPairSync, verify } from 'node:crypto';
-import { statusStore, uploadStore } from '../src/stores.mjs';
+import { attachStoreBuild, statusStore, uploadStore } from '../src/stores.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, realpath, mkdir, writeFile, readFile, readdir, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -165,7 +165,7 @@ async function lifecycleFixture(t, platforms = ['ios']) {
   return f;
 }
 
-async function enableResourceLifecycle(f, stage = 'ui-eval', cacheBudgetBytes = 8) {
+async function configureResourceLifecycle(f, stage, cacheBudgetBytes) {
   const anchor = join(f.base, 'coordination');
   await mkdir(anchor, { mode: 0o700 });
   await mkdir(f.store, { mode: 0o700, recursive: true });
@@ -177,8 +177,12 @@ async function enableResourceLifecycle(f, stage = 'ui-eval', cacheBudgetBytes = 
       inputsAvailable: true, recoveryIndependent: true }) };
   const policy = { schemaVersion: 1, coordinationAnchor: anchor, cacheBudgetBytes,
     minimumFreeBytes: 1, phaseBytes: { validate: 1, execute: 1, content: 1 } };
-  const lifecycle = createResourceLifecycle({ stateDirectory: f.store, policy, adapter });
-  const lease = await acquireMaintenance(anchor, { operation: 'synthetic lifecycle activation' });
+  return createResourceLifecycle({ stateDirectory: f.store, policy, adapter });
+}
+
+async function enableResourceLifecycle(f, stage = 'ui-eval', cacheBudgetBytes = 8) {
+  const lifecycle = await configureResourceLifecycle(f, stage, cacheBudgetBytes);
+  const lease = await acquireMaintenance(lifecycle.coordinationAnchor, { operation: 'synthetic lifecycle activation' });
   await lifecycle.activate({ lease });
   await lease.release();
   const hook = stage === 'checks' ? 'checkSource' : 'evaluateUI';
@@ -790,6 +794,25 @@ test('attach honors both locks and only uses an existing managed admission', asy
   assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
 });
 
+test('preloading an inactive lifecycle policy preserves ordinary attachment', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await configureResourceLifecycle(f, 'checks', 8);
+  f.options.resourceLifecycle = lifecycle;
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic managed attachment' });
+  try {
+    f.options.resourceLease = lease;
+    await assert.rejects(f.invoke(), { code: 'RESOURCE_NOT_ACTIVATED' });
+    assert.deepEqual(f.requests, []);
+  } finally {
+    await lease.release();
+    delete f.options.resourceLease;
+  }
+  const attached = await f.invoke();
+  assert.equal(attached.exit, 0);
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'attached');
+  assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
+});
+
 async function displaceActivityRecord(f, lifecycle, lease, { replace = false } = {}) {
   const owner = join(lifecycle.coordinationAnchor, 'activity-' + lease.owner.token + '.json');
   const saved = join(f.base, 'original-owner.json');
@@ -1047,6 +1070,44 @@ test('managed attach retains activity even when a heavy callback catches uncerta
   });
 });
 
+test('an explicitly borrowed attachment protects activity across its caller boundary', async t => {
+  for (const detached of [false, true]) await t.test(detached ? 'early return' : 'caught error', async t => {
+    const f = await attachFixture(t, { managed: true });
+    const lifecycle = await enableResourceLifecycle(f, 'checks');
+    const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic explicit attachment' });
+    const started = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    const command = f.options.command;
+    f.options.command = async (binary, args, options) => {
+      if (binary === 'git' && args[0] === 'ls-remote') {
+        started.resolve();
+        if (detached) await resume.promise;
+        throw cleanupError();
+      }
+      return command(binary, args, options);
+    };
+    let attachment;
+    try {
+      await lifecycle.admitAttach({ plan: f.plan, lease, execute: async resourceSession => {
+        const runner = createRunner({ ...f.options, resourceSession });
+        attachment = runner.attachBuild(f.plan, { versionId: 'manual-draft' });
+        if (detached) await Promise.race([started.promise, attachment]);
+        else await assert.rejects(attachment, { cleanupIncomplete: true });
+      } });
+      if (detached) await assert.rejects(lease.release(), /borrowed by an active operation/);
+    } finally {
+      resume.resolve();
+      await assert.rejects(attachment, { cleanupIncomplete: true });
+    }
+    await assert.rejects(lease.release(), { cleanupIncomplete: true });
+    await assertCoordinationOwner(lifecycle.coordinationAnchor, lease.owner, 'activity');
+    await assert.rejects(acquireMaintenance(lifecycle.coordinationAnchor, { operation: 'synthetic maintenance' }),
+      { code: 'COORDINATION_BUSY' });
+    assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+    assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+  });
+});
+
 test('a heavy task returning before its attachment finishes keeps the task and lease active', async t => {
   const f = await attachFixture(t, { managed: true });
   const lifecycle = await enableResourceLifecycle(f, 'checks');
@@ -1146,6 +1207,33 @@ test('managed attach cannot dispatch PATCH when its parent returns during the fi
     resume.resolve();
     await assert.rejects(attachment, { code: 'RESOURCE_ADMISSION' });
   }
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'intent');
+  assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+});
+
+test('attachment checks local admission at fetch after the Apple token resolves', async t => {
+  const f = await attachFixture(t);
+  const state = await f.state();
+  let active = true;
+  const ctx = {
+    platform: 'ios', plan: f.plan, config: f.config, artifact: state.artifacts.ios,
+    env: f.options.environment, uploadRequested: true, publicationRequested: false,
+    previous: state.checkpoints.ios,
+    assertPublicationSource: async () => {},
+    assertAttachmentCurrent() {
+      if (!active) throw new Error('Synthetic attachment admission expired');
+    },
+    now() {
+      // Revoke after the token callback begins, before the awaiting transport resumes.
+      if (state.checkpoints.ios['ios-attach']?.state === 'intent') queueMicrotask(() => { active = false; });
+      return Date.now();
+    },
+    async checkpoint(name, evidence) {
+      state.checkpoints.ios[name] = evidence;
+      await saveState(releasePath(f.store, f.plan.id), state);
+    },
+  };
+  await assert.rejects(attachStoreBuild(ctx, { versionId: 'manual-draft' }), /attachment admission expired/);
   assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'intent');
   assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
 });

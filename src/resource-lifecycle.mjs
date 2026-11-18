@@ -53,10 +53,14 @@ function validatePolicy(policy, adapter) {
     throw resourceError('RESOURCE_POLICY', 'Cache declarations must have distinct nonoverlapping leaves');
 }
 
+export async function hasResourceActivation(store) {
+  return Boolean(await present(featurePath(store)));
+}
+
 export async function assertResourceAdmission({ store, plan, session, operation }) {
-  const marker = await present(featurePath(store));
-  if (!marker && !session) return;
-  if (!marker || !sessions.has(session) || session.store !== store || session.plan.id !== plan.id ||
+  const activated = await hasResourceActivation(store);
+  if (!activated && !session) return;
+  if (!activated || !sessions.has(session) || session.store !== store || session.plan.id !== plan.id ||
       session.plan.source !== plan.source || (session.operation === 'attach' && operation !== 'attach'))
     throw resourceError('RESOURCE_ADMISSION', 'Activated resource root requires a live lifecycle admission');
   await session.assertActive();
@@ -349,23 +353,31 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
       if (!sessions.has(admitted) || (parent && !sessions.has(parent)) || lease.retained || lease.owner !== owner)
         throw resourceError('RESOURCE_ADMISSION', 'Managed attachment admission has expired');
     };
+    const borrow = callback => lease.withOwnership({ expectedOwner: owner, expectedAnchor: anchor }, async () => {
+      try { return await callback(); }
+      catch (error) {
+        if (error.cleanupIncomplete) lease.retain();
+        throw error;
+      }
+    });
     const admitted = Object.freeze({
       store, plan: Object.freeze({ id: plan.id, source: plan.source }), operation: 'attach',
       assertCurrent,
+      runAttachment: callback => borrow(() => {
+        assertCurrent();
+        return callback(admitted);
+      }),
       async assertActive() {
         assertCurrent();
         await assertAttachActivity(lease, owner);
         assertCurrent();
       },
     });
-    return lease.withOwnership({ expectedOwner: owner, expectedAnchor: anchor }, async () => {
+    return borrow(async () => {
       sessions.add(admitted);
       try {
         await admitted.assertActive();
         return await execute(admitted);
-      } catch (error) {
-        if (error.cleanupIncomplete) lease.retain();
-        throw error;
       } finally {
         sessions.delete(admitted);
       }

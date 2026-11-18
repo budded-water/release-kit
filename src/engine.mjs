@@ -25,7 +25,7 @@ import { requireProject } from './project.mjs';
 import { createCleanupGuard } from './cleanup.mjs';
 import { runCommand } from './command.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { assertResourceAdmission } from './resource-lifecycle.mjs';
+import { assertResourceAdmission, hasResourceActivation } from './resource-lifecycle.mjs';
 
 const now = () => new Date().toISOString();
 function assertNativeWorkspace(directory) {
@@ -895,7 +895,9 @@ export function createRunner({
     const execute = session => resourceContext.run(session, () =>
       admittedRelease(plan, task, { existingOnly: true, operation: 'attach' }));
     if (resourceSession?.admitAttach) return resourceSession.admitAttach(execute);
-    if (resourceSession || !resourceLifecycle) return execute(resourceSession);
+    if (resourceSession?.runAttachment) return resourceSession.runAttachment(execute);
+    if (resourceSession || !resourceLifecycle || (!resourceLease && !await hasResourceActivation(store)))
+      return execute(resourceSession);
     return resourceLifecycle.admitAttach({ plan, lease: resourceLease, execute });
   }
   async function validate(plan, { ui = false } = {}) {

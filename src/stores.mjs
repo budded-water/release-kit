@@ -163,7 +163,7 @@ function result(ctx, state, values = {}) {
   };
 }
 
-async function request(ctx, url, token, options = {}) {
+async function request(ctx, url, token, options = {}, beforeFetch) {
   ctx.signal?.throwIfAborted();
   const origin = new URL(url).origin;
   if (![APPLE, GOOGLE, IAM, new URL(OAUTH).origin].includes(origin))
@@ -173,6 +173,7 @@ async function request(ctx, url, token, options = {}) {
   let response;
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 60000);
   const signal = ctx.signal ? AbortSignal.any([ctx.signal, timeout]) : timeout;
+  beforeFetch?.();
   try {
     response = await (ctx.fetch ?? fetch)(url, {
       ...options,
@@ -1489,13 +1490,17 @@ export async function attachStoreBuild(ctx, { versionId } = {}) {
   if (await readBeforeWrite()) return finish(false);
   await save(ctx, 'ios-attach', { state: 'intent', versionId, buildId });
   await ctx.assertAttachmentAdmission?.();
-  ctx.assertAttachmentCurrent?.();
+  let dispatched = false;
   try {
     await request(ctx, relationship, token, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ data: { type: 'builds', id: buildId } }),
+    }, () => {
+      ctx.assertAttachmentCurrent?.();
+      dispatched = true;
     });
-  } catch {
+  } catch (error) {
+    if (!dispatched) throw error;
     // A lost response may have committed. Read once, never repeat the PATCH.
     ctx.signal?.throwIfAborted();
   }
