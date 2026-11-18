@@ -345,12 +345,17 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
   }
 
   async function withAttachSession(plan, lease, owner, execute, parent) {
+    const assertCurrent = () => {
+      if (!sessions.has(admitted) || (parent && !sessions.has(parent)) || lease.retained || lease.owner !== owner)
+        throw resourceError('RESOURCE_ADMISSION', 'Managed attachment admission has expired');
+    };
     const admitted = Object.freeze({
       store, plan: Object.freeze({ id: plan.id, source: plan.source }), operation: 'attach',
+      assertCurrent,
       async assertActive() {
-        if (!sessions.has(admitted) || (parent && !sessions.has(parent)))
-          throw resourceError('RESOURCE_ADMISSION', 'Managed attachment admission has expired');
+        assertCurrent();
         await assertAttachActivity(lease, owner);
+        assertCurrent();
       },
     });
     return lease.withOwnership({ expectedOwner: owner, expectedAnchor: anchor }, async () => {

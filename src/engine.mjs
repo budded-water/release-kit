@@ -874,13 +874,16 @@ export function createRunner({
         const root = checkoutDirectory(state, directory, 'ios');
         const ctx = context(state, directory, 'ios', root);
         const session = resourceContext.getStore();
+        const assertAttachmentCurrent = session?.assertCurrent;
         const assertAttachmentAdmission = () =>
           assertResourceAdmission({ store, plan, session, operation: 'attach' });
         const report = await attachStoreBuild({
           ...ctx,
           assertAttachmentAdmission,
+          assertAttachmentCurrent,
           checkpoint: async (name, evidence) => {
             await assertAttachmentAdmission();
+            assertAttachmentCurrent?.();
             await ctx.checkpoint(name, evidence);
           },
         }, { versionId });
@@ -891,10 +894,7 @@ export function createRunner({
     };
     const execute = session => resourceContext.run(session, () =>
       admittedRelease(plan, task, { existingOnly: true, operation: 'attach' }));
-    if (resourceSession?.admitAttach) {
-      await assertResourceAdmission({ store, plan, session: resourceSession, operation: 'attach' });
-      return resourceSession.admitAttach(execute);
-    }
+    if (resourceSession?.admitAttach) return resourceSession.admitAttach(execute);
     if (resourceSession || !resourceLifecycle) return execute(resourceSession);
     return resourceLifecycle.admitAttach({ plan, lease: resourceLease, execute });
   }

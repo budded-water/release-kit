@@ -1088,6 +1088,68 @@ test('a heavy task returning before its attachment finishes keeps the task and l
   assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
 });
 
+test('a heavy task cannot settle after starting attachment but before asynchronous admission', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic early parent return' });
+  let attachment;
+  let settled = false;
+  try {
+    await assert.rejects(lifecycle.run({ plan: f.plan, operation: 'execute', lease,
+      execute: resourceSession => {
+        const runner = createRunner({ ...f.options, resourceSession });
+        attachment = runner.attachBuild(f.plan, { versionId: 'manual-draft' });
+        attachment.catch(() => {});
+        return { state: 'uploaded' };
+      },
+      settle: async () => { settled = true; },
+    }), { code: 'RESOURCE_OWNERSHIP', cleanupIncomplete: true });
+    assert.equal(settled, false);
+    assert.equal(lease.retained, true);
+    const tasks = Object.values((await readResourceLedger(f.store)).state.tasks);
+    assert.deepEqual(tasks.map(task => task.state), ['active']);
+  } finally {
+    await assert.rejects(attachment, /admission|ownership|lease/i);
+  }
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+  assert.deepEqual(f.requests, []);
+});
+
+test('managed attach cannot dispatch PATCH when its parent returns during the final ownership check', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic parent return before dispatch' });
+  const verified = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const check = lease.assertOwnership;
+  lease.assertOwnership = async options => {
+    await check(options);
+    if ((await f.state()).checkpoints.ios['ios-attach']?.state === 'intent') {
+      verified.resolve();
+      await resume.promise;
+    }
+  };
+  let attachment;
+  try {
+    await assert.rejects(lifecycle.run({ plan: f.plan, operation: 'execute', lease,
+      execute: async resourceSession => {
+        const runner = createRunner({ ...f.options, resourceSession });
+        attachment = runner.attachBuild(f.plan, { versionId: 'manual-draft' });
+        await Promise.race([verified.promise, attachment]);
+        return { state: 'uploaded' };
+      },
+    }), { code: 'RESOURCE_OWNERSHIP', cleanupIncomplete: true });
+    assert.equal(lease.retained, true);
+    const tasks = Object.values((await readResourceLedger(f.store)).state.tasks);
+    assert.deepEqual(tasks.map(task => task.state), ['active']);
+  } finally {
+    resume.resolve();
+    await assert.rejects(attachment, { code: 'RESOURCE_ADMISSION' });
+  }
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'intent');
+  assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+});
+
 test('attachment preserves the existing confirmed unsubmitted-upload handoff boundary', async t => {
   const variants = ['confirmed', 'cleared', 'pending', 'pending-terminal', 'replacement-draft',
     'stale-selection', 'stale-review-state', 'omitted-draft', 'deleted-draft', 'confirmed-terminal', 'stale-terminal'];

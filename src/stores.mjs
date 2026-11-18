@@ -1489,6 +1489,7 @@ export async function attachStoreBuild(ctx, { versionId } = {}) {
   if (await readBeforeWrite()) return finish(false);
   await save(ctx, 'ios-attach', { state: 'intent', versionId, buildId });
   await ctx.assertAttachmentAdmission?.();
+  ctx.assertAttachmentCurrent?.();
   try {
     await request(ctx, relationship, token, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
