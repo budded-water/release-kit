@@ -49,3 +49,7 @@ maintain its own authentication cache outside runner-managed state.
   while the operation-wide deadline remains open
 - **THEN** the read is unavailable and cannot establish successful status or
   advance a timed-out identity lookup to another provider request
+
+#### Scenario: Task-resource isolation
+- **WHEN** a caller supplies task-resource lifecycle hooks to a shared CLI store read
+- **THEN** the read does not acquire task/session leases or invoke resource reclamation
