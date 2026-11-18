@@ -167,7 +167,7 @@ async function lifecycleFixture(t, platforms = ['ios']) {
   return f;
 }
 
-async function configureResourceLifecycle(f, stage, cacheBudgetBytes) {
+async function configureResourceLifecycle(f, stage, cacheBudgetBytes, signal) {
   const anchor = join(f.base, 'coordination');
   await mkdir(anchor, { mode: 0o700 });
   await mkdir(f.store, { mode: 0o700, recursive: true });
@@ -179,11 +179,11 @@ async function configureResourceLifecycle(f, stage, cacheBudgetBytes) {
       inputsAvailable: true, recoveryIndependent: true }) };
   const policy = { schemaVersion: 1, coordinationAnchor: anchor, cacheBudgetBytes,
     minimumFreeBytes: 1, phaseBytes: { validate: 1, execute: 1, content: 1 } };
-  return createResourceLifecycle({ stateDirectory: f.store, policy, adapter });
+  return createResourceLifecycle({ stateDirectory: f.store, policy, adapter, signal });
 }
 
-async function enableResourceLifecycle(f, stage = 'ui-eval', cacheBudgetBytes = 8) {
-  const lifecycle = await configureResourceLifecycle(f, stage, cacheBudgetBytes);
+async function enableResourceLifecycle(f, stage = 'ui-eval', cacheBudgetBytes = 8, signal) {
+  const lifecycle = await configureResourceLifecycle(f, stage, cacheBudgetBytes, signal);
   const lease = await acquireMaintenance(lifecycle.coordinationAnchor, { operation: 'synthetic lifecycle activation' });
   await lifecycle.activate({ lease });
   await lease.release();
@@ -1333,6 +1333,46 @@ test('cancelling managed attach before intent commit leaves no pending attachmen
     checkpointPause.restore();
     await lease.release();
   }
+});
+
+test('cancelling the lifecycle signal alone stops attachment commit and transport', async t => {
+  for (const dispatch of [false, true]) await t.test(dispatch ? 'transport' : 'intent', async t => {
+    const f = await attachFixture(t, { managed: true });
+    const controller = new AbortController();
+    const lifecycle = await enableResourceLifecycle(f, 'checks', 8, controller.signal);
+    const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic lifecycle cancellation' });
+    const pause = dispatch ? null : pauseAttachmentCheckpoint(t, f, 'intent');
+    const verified = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    if (dispatch) {
+      const check = lease.assertOwnership;
+      lease.assertOwnership = async options => {
+        await check(options);
+        if ((await f.state()).checkpoints.ios['ios-attach']?.state === 'intent') {
+          verified.resolve();
+          await resume.promise;
+        }
+      };
+    }
+    const attachment = lifecycle.run({ plan: f.plan, operation: 'execute', lease,
+      execute: resourceSession => createRunner({ ...f.options, resourceSession })
+        .attachBuild(f.plan, { versionId: 'manual-draft' }),
+    });
+    try {
+      await Promise.race([pause?.staged ?? verified.promise, attachment]);
+      controller.abort();
+      pause?.resume();
+      resume.resolve();
+      await assert.rejects(attachment, { name: 'AbortError' });
+      assert.equal((await f.state()).checkpoints.ios['ios-attach']?.state, dispatch ? 'intent' : undefined);
+      assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+    } finally {
+      pause?.resume();
+      resume.resolve();
+      pause?.restore();
+      await lease.release();
+    }
+  });
 });
 
 test('successful source verification after the parent returns does not append attachment evidence', async t => {

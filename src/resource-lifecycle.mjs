@@ -350,6 +350,7 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
 
   async function withAttachSession(plan, lease, owner, execute, parent) {
     const assertCurrent = () => {
+      signal?.throwIfAborted();
       if (!sessions.has(admitted) || (parent && !sessions.has(parent)) || lease.retained || lease.owner !== owner)
         throw resourceError('RESOURCE_ADMISSION', 'Managed attachment admission has expired');
     };

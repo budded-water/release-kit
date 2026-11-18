@@ -1497,6 +1497,7 @@ export async function attachStoreBuild(ctx, { versionId } = {}) {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ data: { type: 'builds', id: buildId } }),
     }, () => {
+      ctx.signal.throwIfAborted();
       ctx.assertAttachmentCurrent?.();
       dispatched = true;
     });
