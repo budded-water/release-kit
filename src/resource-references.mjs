@@ -7,6 +7,16 @@ import { containsPath } from './resource-files.mjs';
 const pathKey = key => ['path', 'file', 'directory', 'root', 'cwd', 'receipt', 'report', 'evidence', 'artifact'].includes(key) ||
   /(?:Path|File|Directory|Root|Receipt|Report)$/.test(key);
 
+// These schema-v1 fields are written by the engine's error formatter. Their
+// strings preserve diagnostics, not file dependencies. Custom fields, including
+// custom `error`/`message` fields, retain the conservative reference rules.
+const diagnosticField = path =>
+  path.length === 2 && ['sourceValidation', 'uiValidation'].includes(path[0]) && path[1] === 'error' ||
+  path.length === 3 && ['stages', 'acceptanceStatus'].includes(path[0]) && path[2] === 'error' ||
+  path.length === 3 && ['outcomes', 'observations'].includes(path[0]) &&
+    ['ios', 'android', 'harmony'].includes(path[1]) && path[2] === 'message' ||
+  path.join('.') === 'retiredBuilds.*.stage.error';
+
 // All retained snapshots participate. The adapter additionally verifies referenced
 // reports; parsing release JSON alone cannot prove those files contain no inputs.
 export async function inspectResourceReferences(store, adapter, { signal, timeoutMs = 30000 } = {}) {
@@ -18,10 +28,15 @@ export async function inspectResourceReferences(store, adapter, { signal, timeou
     if (Date.now() >= deadline || entries > 10000 || nodes > 1000000 || bytes > 64 * 1024 * 1024)
       throw resourceError('RESOURCE_BUDGET', 'Historical reference assessment is incomplete');
   };
-  function collect(value, key = '', depth = 0) {
+  function collect(value, key = '', depth = 0, path = []) {
     check();
     if (++nodes > 1000000 || depth > 64) throw resourceError('RESOURCE_BUDGET', 'Reference complexity budget exhausted');
     if (typeof value === 'string') {
+      if (diagnosticField(path)) return;
+      // Planner v1 retains these Git object identities under legacy *Path keys.
+      // A malformed value or similarly named custom field is still unknown.
+      if (path.length === 3 && path[0] === 'plan' && path[1] === 'metadata' &&
+          ['metadataPath', 'submissionInformationPath'].includes(path[2]) && /^[a-f0-9]{40}$/.test(value)) return;
       if (value.length > 4096 || /^file:/i.test(value))
         throw resourceError('RESOURCE_REFERENCES', 'Historical reference scope is unknown');
       if (isAbsolute(value)) {
@@ -35,7 +50,8 @@ export async function inspectResourceReferences(store, adapter, { signal, timeou
       if (Object.keys(value).length > 1000000 - nodes)
         throw resourceError('RESOURCE_BUDGET', 'Reference complexity budget exhausted');
       for (const [childKey, child] of Object.entries(value))
-        collect(child, Array.isArray(value) ? key : childKey, depth + 1);
+        collect(child, Array.isArray(value) ? key : childKey, depth + 1,
+          [...path, Array.isArray(value) ? '*' : childKey]);
     }
   }
   const releases = join(store, 'releases');

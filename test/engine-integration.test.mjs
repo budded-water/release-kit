@@ -100,6 +100,46 @@ async function fixture(t, platforms = ['ios', 'android']) {
 
 const cleanupError = () => Object.assign(new Error('Synthetic unsettled process group'), { cleanupIncomplete: true });
 
+test('doctor diagnostics never create a journal-less release or block lifecycle admission', async t => {
+  const f = await lifecycleFixture(t);
+  f.adapters.ios.doctor = async ctx => {
+    await ctx.command(process.execPath, ['-e', 'process.stdout.write("synthetic readiness")']);
+    return { checks: [{ name: 'synthetic', ok: true }] };
+  };
+  const reports = [];
+  assert.equal(await main({ ...f.options, platformAdapters: f.adapters,
+    args: ['doctor', '--config', f.configPath, '--platforms', 'ios', '--state-dir', f.store],
+    output: value => reports.push(JSON.parse(value)) }), 0);
+  const logs = join(f.store, 'diagnostics', f.plan.id, 'logs');
+  assert.equal(reports[0].diagnosticsDirectory, logs);
+  assert.equal((await readdir(logs)).length, 1);
+  await assert.rejects(readdir(join(f.store, 'releases')), { code: 'ENOENT' });
+  f.options.resourceLifecycle = await enableResourceLifecycle(f);
+  assert.equal((await f.runner().validate(f.plan)).sourceValidation.state, 'passed');
+  assert.equal((await readdir(logs)).length, 1);
+});
+
+test('tracked store metadata Git identities do not become unresolved filesystem references', async t => {
+  const f = await lifecycleFixture(t);
+  await mkdir(join(f.repo, 'metadata'));
+  await writeFile(join(f.repo, 'metadata', 'description.txt'), 'Synthetic listing');
+  await writeFile(join(f.repo, 'submission.json'), '{}');
+  await runCommand('git', ['add', '.'], { cwd: f.repo });
+  await runCommand('git', ['commit', '-qm', 'synthetic tracked store metadata'], { cwd: f.repo });
+  f.config.stores = { ios: { metadataPath: 'metadata', submissionInformationPath: 'submission.json' } };
+  f.plan = await createPlan({ ...f.options, ref: 'HEAD', platforms: ['ios'] });
+  assert.match(f.plan.metadata.metadataPath, /^[a-f0-9]{40}$/);
+  assert.match(f.plan.metadata.submissionInformationPath, /^[a-f0-9]{40}$/);
+  f.options.resourceLifecycle = await enableResourceLifecycle(f, 'checks');
+  for (let index = 0; index < 2; index++) {
+    const runner = f.runner();
+    await runner.validate(f.plan);
+    assert.equal(runner.resourceMaintenance.outcome, 'complete');
+  }
+  assert.equal(f.calls.filter(call => call === 'checks').length, 2);
+  assert.equal(f.calls.filter(call => call === 'install-validation').length, 1);
+});
+
 async function lifecycleFixture(t, platforms = ['ios']) {
   const f = await fixture(t, platforms);
   await runCommand('git', ['remote', 'set-url', 'origin', 'https://github.com/example/synthetic.git'], { cwd: f.repo });

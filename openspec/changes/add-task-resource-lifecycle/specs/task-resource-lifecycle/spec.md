@@ -78,6 +78,16 @@ attempt eligible reclamation after execution, with next-entry recovery for misse
 The system SHALL delete only registered rebuildable resources cleared by fresh complete
 ownership, source, reconstruction, historical-reference and filesystem-identity checks under maintenance.
 
+#### Scenario: Prerequisite diagnostics and engine errors
+- **WHEN** prerequisite-only doctor commands produce logs or typed engine error fields contain compiler paths
+- **THEN** doctor logs remain outside the journaled release namespace and engine diagnostic text does not declare a file dependency
+- **AND** historical bytes, custom fields and typed path references retain their protection; old journal-less directories are not silently adopted or removed
+
+#### Scenario: Planner metadata identities
+- **WHEN** schema-v1 plan metadata stores a valid Git object identity under its legacy metadataPath or submissionInformationPath key
+- **THEN** reference assessment treats that exact typed value as an identity rather than a relative filename
+- **AND** malformed values, custom fields and actual path dependencies remain fail-closed
+
 #### Scenario: Receipt or historical reference
 - **WHEN** any retained or cross-release evidence requires a target, descendant or enclosing path
 - **THEN** that resource is protected and old reference semantics are not weakened to enable deletion

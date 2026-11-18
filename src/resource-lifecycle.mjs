@@ -198,7 +198,7 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
       signal?.throwIfAborted();
       report.observationComplete = false;
       report.outcome = 'incomplete';
-      report.errors.push(error.code ?? 'RESOURCE_REFERENCES');
+      report.errors.push(resourceCode(error));
       return report;
     }
     const candidates = [];
@@ -233,7 +233,7 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
       try { observed = await observeResource(store, resource, { signal }); }
       catch (error) {
         signal?.throwIfAborted();
-        result.reasons.push(error.code ?? 'resource-unreadable');
+        result.reasons.push(resourceCode(error));
         report.observationComplete = false;
         continue;
       }
@@ -286,7 +286,7 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
         lease.retain();
         report.ownershipRetained = true;
         report.outcome = 'incomplete';
-        report.errors.push(error.code ?? 'RESOURCE_REMOVAL');
+        report.errors.push(resourceCode(error));
         result.disposition = 'incomplete';
         result.state = 'reclaiming';
         report.afterFreeBytes = await freeBytes();

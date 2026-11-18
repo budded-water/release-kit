@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { chmod, mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile, unlink, rename } from 'node:fs/promises';
+import { chmod, link, mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile, unlink, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -429,4 +429,157 @@ test('ownership finalization failure preserves the original task error and its a
     execute: async () => { throw failure; } }), error => error === failure && error.resourceOwnership === 'EIO');
   assert.equal(lease.retained, true);
   assert.equal((await inspectCoordination(f.anchor)).activities.length, 1);
+});
+
+test('adapter error codes cannot leak arbitrary values into bounded maintenance reports', async t => {
+  const f = await fixture(t, { references: async () => {
+    throw Object.assign(new Error('PRIVATE credential detail'), { code: 'PRIVATE_CREDENTIAL_VALUE' });
+  } });
+  const report = await f.lifecycle.reclaim({ dryRun: true });
+  assert.equal(report.outcome, 'incomplete');
+  assert.deepEqual(report.errors, ['RESOURCE_ASSESSMENT']);
+  assert.equal(JSON.stringify(report).includes('PRIVATE'), false);
+});
+
+test('engine diagnostic text is not a file dependency while custom fields and typed paths remain protected', async t => {
+  const f = await fixture(t);
+  f.state.outcomes = { ios: { state: 'blocked', message: '/outside/compiler reported an error' } };
+  f.state.retiredBuilds = [{ stage: { status: 'unknown', error: '/outside/tool failed earlier' } }];
+  f.state.uiValidation = { state: 'passed', error: '/outside/old diagnostic retained in history' };
+  await saveState(releasePath(f.store, plan.id), f.state);
+  let cache;
+  const result = await f.lifecycle.run({ plan, operation: 'validate', execute: async session => {
+    cache = await session.prepareCache('compiler', f.workspace);
+    await writeFile(join(cache, 'object.o'), '0123456789abcdef');
+  } });
+  assert.equal(result.maintenance.outcome, 'complete');
+  await assert.rejects(stat(cache), { code: 'ENOENT' });
+  const history = await readFile(join(releasePath(f.store, plan.id), 'events/00000002.json'), 'utf8');
+  assert.ok(history.includes('/outside/compiler reported an error'));
+  for (const value of [{ custom: { error: '/outside/required-input' } },
+    { artifacts: { ios: { path: '/outside/required-artifact' } } },
+    { plan: { ...plan, metadata: { metadataPath: 'not-a-Git-object' } } }]) {
+    const protectedFixture = await fixture(t);
+    Object.assign(protectedFixture.state, value);
+    await saveState(releasePath(protectedFixture.store, plan.id), protectedFixture.state);
+    const report = await protectedFixture.lifecycle.reclaim({ dryRun: true });
+    assert.equal(report.outcome, 'incomplete');
+    assert.deepEqual(report.errors, ['RESOURCE_REFERENCES']);
+  }
+});
+
+test('compatible restart preserves the feature fence and incompatible policy cannot act as a rollback', async t => {
+  const f = await fixture(t);
+  const marker = join(f.store, 'resources/feature.json');
+  const original = await readFile(marker);
+  const incompatible = createResourceLifecycle({ stateDirectory: f.store,
+    policy: { ...f.policy, cacheBudgetBytes: f.policy.cacheBudgetBytes + 1 }, adapter: f.adapter });
+  await assert.rejects(incompatible.run({ plan, operation: 'validate', execute: async () => assert.fail('Must not execute') }),
+    { code: 'RESOURCE_COMPATIBILITY' });
+  assert.deepEqual(await readFile(marker), original);
+  const restored = createResourceLifecycle({ stateDirectory: f.store, policy: f.policy, adapter: f.adapter });
+  const result = await restored.run({ plan, operation: 'validate', execute: async session => {
+    const cache = await session.prepareCache('compiler', f.workspace);
+    await writeFile(join(cache, 'object.o'), '0123456789abcdef');
+  } });
+  assert.equal(result.maintenance.outcome, 'complete');
+  assert.deepEqual(await readFile(marker), original);
+  const file = join(f.root, 'policy.json');
+  await writeFile(file, JSON.stringify(f.policy), { mode: 0o600 });
+  await assert.rejects(main({ args: ['storage-reclaim', '--config', file, '--disable'],
+    project: { resourceAdapter: async () => f.adapter }, output() {} }), /Unknown option/);
+  assert.deepEqual(await readFile(marker), original);
+});
+
+test('the independent session finalizer deadline rejects and retains ownership when the adapter never settles', async t => {
+  let started;
+  const entered = new Promise(resolve => { started = resolve; });
+  const f = await fixture(t, { sessions: ['synthetic-session'], releaseSession: async ({ signal }) => {
+    started(signal);
+    await new Promise(() => {});
+  } });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const running = f.lifecycle.run({ plan, operation: 'validate', execute: async session => {
+      await session.registerSession('synthetic-session', { owner: 'controlled never-settled session' });
+    } });
+    const rejected = assert.rejects(running, { code: 'RESOURCE_SESSION_TIMEOUT' });
+    const cleanupSignal = await entered;
+    assert.equal(cleanupSignal.aborted, false);
+    t.mock.timers.tick(45000);
+    await rejected;
+    assert.equal(cleanupSignal.aborted, true);
+    assert.equal((await inspectCoordination(f.anchor)).activities.length, 1);
+    assert.equal(Object.values((await readResourceLedger(f.store)).state.sessions)[0].state, 'release-pending');
+  } finally { t.mock.timers.reset(); }
+});
+
+test('a real cross-release reference protects another release cache and relative references block assessment', async t => {
+  const f = await fixture(t);
+  let cache;
+  const other = { ...f.state, plan: { ...plan, id: `release-${'d'.repeat(24)}` } };
+  await f.lifecycle.run({ plan, operation: 'validate', execute: async session => {
+    cache = await session.prepareCache('compiler', f.workspace);
+    await writeFile(join(cache, 'object.o'), '0123456789abcdef');
+    other.requiredFile = join(cache, 'object.o');
+    await saveState(releasePath(f.store, other.plan.id), other);
+  } });
+  const lease = await acquireMaintenance(f.anchor, { operation: 'cross-release reference check' });
+  try {
+    const report = await f.lifecycle.reclaim({ lease });
+    assert.equal(report.outcome, 'protected-capacity');
+    assert.ok(report.resources[0].reasons.includes('retained-reference'));
+    other.requiredFile = 'relative/unknown-input';
+    await saveState(releasePath(f.store, other.plan.id), other);
+    const incomplete = await f.lifecycle.reclaim({ lease });
+    assert.equal(incomplete.outcome, 'incomplete');
+    assert.deepEqual(incomplete.errors, ['RESOURCE_REFERENCES']);
+    assert.equal(await readFile(join(cache, 'object.o'), 'utf8'), '0123456789abcdef');
+  } finally { await lease.release(); }
+});
+
+test('hard-linked files make the entire cache assessment incomplete without deleting earlier candidates', async t => {
+  const f = await fixture(t, { caches: {
+    compiler: { path: '.native/intermediates', stages: ['ui-eval'] },
+    index: { path: '.native/index', stages: ['ui-eval'] },
+  } });
+  const outside = join(f.root, 'durable-input');
+  await writeFile(outside, 'retained');
+  let first;
+  const result = await f.lifecycle.run({ plan, operation: 'validate', execute: async session => {
+    first = await session.prepareCache('compiler', f.workspace);
+    await writeFile(join(first, 'object.o'), '0123456789abcdef');
+    const second = await session.prepareCache('index', f.workspace);
+    await link(outside, join(second, 'shared-input'));
+  } });
+  assert.equal(result.maintenance.outcome, 'incomplete');
+  assert.equal(await readFile(join(first, 'object.o'), 'utf8'), '0123456789abcdef');
+  assert.equal(await readFile(outside, 'utf8'), 'retained');
+  assert.equal((await stat(outside)).nlink, 2);
+});
+
+test('corrupt, truncated or missing ledger events fail closed before another task can allocate', async t => {
+  for (const variant of ['checksum', 'truncated', 'missing']) {
+    await t.test(variant, async t => {
+      const f = await fixture(t);
+      let cache;
+      await f.lifecycle.run({ plan, operation: 'validate', execute: async session => {
+        cache = await session.prepareCache('compiler', f.workspace);
+        await writeFile(join(cache, 'object.o'), 'kept');
+      } });
+      const path = join(f.store, 'resources/events/00000001.json');
+      if (variant === 'missing') await unlink(path);
+      else if (variant === 'truncated') await writeFile(path, '{');
+      else {
+        const event = JSON.parse(await readFile(path, 'utf8'));
+        Object.values(event.state.tasks)[0].reservedBytes++;
+        await writeFile(path, JSON.stringify(event));
+      }
+      let allocated = false;
+      await assert.rejects(f.lifecycle.run({ plan, operation: 'validate', execute: async () => { allocated = true; } }));
+      assert.equal(allocated, false);
+      assert.equal(await readFile(join(cache, 'object.o'), 'utf8'), 'kept');
+      assert.equal((await inspectCoordination(f.anchor)).activities.length, 0);
+    });
+  }
 });
