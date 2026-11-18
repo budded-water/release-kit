@@ -878,17 +878,18 @@ export function createRunner({
         const assertAttachmentCurrent = session?.assertCurrent;
         const assertAttachmentAdmission = () =>
           assertResourceAdmission({ store, plan, session, operation: 'attach' });
-        const sourceCommand = (binary, args, options) => cleanup.run(() => {
+        const attachmentCommand = (binary, args, options) => cleanup.run(() => {
           signal?.throwIfAborted();
           assertAttachmentCurrent?.();
           return executeCommand(binary, args, { ...options, signal, diagnostics: false });
         });
         const report = await attachStoreBuild({
           ...ctx,
+          command: attachmentCommand,
           assertAttachmentAdmission,
           assertAttachmentCurrent,
           assertPublicationSource: () => verifyProductionSource(state, directory, 'ios', root, 'publication',
-            { persist: false, sourceCommand }),
+            { persist: false, sourceCommand: attachmentCommand }),
           checkpoint: async (name, evidence, { signal: intentSignal } = {}) => {
             await assertAttachmentAdmission();
             await ctx.checkpoint(name, evidence, () => {

@@ -597,9 +597,16 @@ function boundedAdapter(f) {
   };
 }
 
-async function attachFixture(t, { managed = false } = {}) {
+async function attachFixture(t, { managed = false, prepared = false } = {}) {
   const f = managed ? await lifecycleFixture(t) : await fixture(t, ['ios']);
   f.config.stores = { ios: { appId: '123', bundleId: 'example.synthetic', apiKeyPathEnv: 'ATTACH_TEST_KEY' } };
+  if (prepared) {
+    f.config.stores.ios.contentPath = 'content.json';
+    await writeFile(join(f.repo, 'content.json'), JSON.stringify({ schemaVersion: 1, platform: 'ios',
+      version: '1.0.0', locales: [{ locale: 'en-US', fields: { whatsNew: 'Synthetic notes' }, screenshots: [] }] }));
+    await runCommand('git', ['add', 'content.json'], { cwd: f.repo });
+    await runCommand('git', ['commit', '-qm', 'synthetic prepared content'], { cwd: f.repo });
+  }
   await writeFile(f.configPath, JSON.stringify(f.config));
   f.plan = await createPlan({ repo: f.repo, ref: 'HEAD', platforms: ['ios'], config: f.config });
   const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
@@ -621,6 +628,15 @@ async function attachFixture(t, { managed = false } = {}) {
     state: 'PREPARE_FOR_SUBMISSION', releaseType: 'MANUAL', processing: 'VALID', expired: false, relationshipMissing: false, snapshotSelected: undefined, linkageSelected: undefined,
     inventoryMissing: false, inventorySelected: undefined, draftDeleted: false, snapshotState: undefined,
     onPatch: null, onFreshBuild: null };
+  if (prepared) {
+    const directory = releasePath(f.store, f.plan.id);
+    const stored = await state();
+    const { inputDigest } = await loadStoreContent({ root: join(directory, 'build-ios'), config: f.config,
+      platform: 'ios', plan: f.plan, command: f.options.command });
+    stored.storePreparation = { ios: { status: 'prepared', inputDigest,
+      observation: { remote: { target: { id: remote.versionId } } } } };
+    await saveState(directory, stored);
+  }
   const requests = [];
   const build = id => ({ id, type: 'builds', attributes: { version: '1', processingState: remote.processing, expired: remote.expired },
     relationships: { preReleaseVersion: { data: { id: 'pre-version', type: 'preReleaseVersions' } } } });
@@ -1375,9 +1391,10 @@ test('cancelling the lifecycle signal alone stops attachment commit and transpor
   });
 });
 
-test('after the parent returns attachment starts no further source command, journal append or PATCH', async t => {
-  for (const step of ['ls-remote', 'status']) await t.test(step, async t => {
-    const f = await attachFixture(t, { managed: true });
+test('after the parent returns attachment starts no further source or content command, journal append or PATCH', async t => {
+  for (const phase of ['ls-remote', 'status', 'prepared content']) await t.test(phase, async t => {
+    const f = await attachFixture(t, { managed: true, prepared: phase === 'prepared content' });
+    const step = phase === 'ls-remote' ? 'ls-remote' : 'status';
     const lifecycle = await enableResourceLifecycle(f, 'checks');
     const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic deferred source verification' });
     const events = join(releasePath(f.store, f.plan.id), 'events');
