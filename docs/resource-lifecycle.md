@@ -40,8 +40,9 @@ reconciliation, not directory replacement.
 
 A managed iOS build attachment borrows an existing activity lease. The
 activated policy and settled resource journal must match the installed state
-root. The admission is scoped to the saved release and the attachment command
-for the duration of the callback. It preserves the lease and resource journal
+root. The admission is scoped to the saved release, attachment command, and
+one continuous activity lease. The runner rechecks ownership and the active
+policy before recording attachment checkpoints. It preserves the lease and resource journal
 without opening a heavy lifecycle task. See [bounded attachment](ios-upload.md#attach-the-confirmed-build-to-a-manual-draft).
 
 ## Trusted adapter and resource boundaries

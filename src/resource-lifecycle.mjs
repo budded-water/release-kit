@@ -54,8 +54,9 @@ function validatePolicy(policy, adapter) {
 }
 
 export async function assertResourceAdmission({ store, plan, session, operation }) {
-  if (!(await present(featurePath(store)))) return;
-  if (!sessions.has(session) || session.store !== store || session.plan.id !== plan.id ||
+  const marker = await present(featurePath(store));
+  if (!marker && !session) return;
+  if (!marker || !sessions.has(session) || session.store !== store || session.plan.id !== plan.id ||
       session.plan.source !== plan.source || (session.operation === 'attach' && operation !== 'attach'))
     throw resourceError('RESOURCE_ADMISSION', 'Activated resource root requires a live lifecycle admission');
   await session.assertActive();
@@ -350,9 +351,12 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
       store, plan: Object.freeze({ id: plan.id, source: plan.source }), operation: 'attach',
       async assertActive() {
         signal?.throwIfAborted();
-        if (!sessions.has(session) || lease.retained)
+        if (!sessions.has(session) || lease.retained || lease.owner !== owner)
           throw resourceError('RESOURCE_ADMISSION', 'Managed attachment admission has expired');
+        await feature();
         await assertCoordinationOwner(anchor, owner, 'activity');
+        if (lease.owner !== owner)
+          throw resourceError('RESOURCE_ADMISSION', 'Managed attachment activity changed');
       },
     });
     sessions.add(session);
