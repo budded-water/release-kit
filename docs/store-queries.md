@@ -236,8 +236,13 @@ existing gcloud impersonation, plus exact CN Harmony formal and available test
 versions through status and preflight. Pure assessment replay matched without extra
 requests. This is one app/account per provider, not other tracks, complete history,
 reviewer login, device installation or publication readiness. Private identities
-and evidence remain outside the repository. Installed query-client adoption remains
-a separate gate; managed release controllers are not upgraded by these reads.
+and evidence remain outside the repository. Separate standalone query-client
+adoption has verified an immutable reviewed package pin, all installed package
+bytes, the existing three-command read-only launcher and its write-command guard.
+Installed-launcher observations passed for the same Play production and CN Harmony
+formal/test targets, plus the existing Apple inventories in two projects. The prior
+client is retained for rollback. This adoption does not upgrade App release
+controllers, activate lifecycle policy or perform store writes.
 
 Harmony version-list discovery is not implemented by this CLI. The official
 [version-list API](https://developer.huawei.com/consumer/cn/doc/app/agc-help-publish-api-query-brief-info-list-0000002236201254/)
