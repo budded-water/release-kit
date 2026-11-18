@@ -195,6 +195,8 @@ export async function main({
           (['publish', 'ui', 'remote', 'summary'].includes(key) && values[key]) ||
           (key === 'executor' && values[key] !== 'local')))
       throw new Error('Attach accepts an existing release ID, explicit draft --version-id and local configuration only');
+    if (resourceSession)
+      throw new Error('Attach CLI requires a dedicated local invocation. Use the runner API to delegate an attachment.');
   } else if (values['version-id'] !== undefined) {
     throw new Error('--version-id is only valid for attach or standalone store reads');
   }

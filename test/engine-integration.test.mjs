@@ -797,10 +797,12 @@ test('attach honors both locks and only uses an existing managed admission', asy
 test('preloading an inactive lifecycle policy preserves ordinary attachment', async t => {
   const f = await attachFixture(t, { managed: true });
   const lifecycle = await configureResourceLifecycle(f, 'checks', 8);
-  f.options.resourceLifecycle = lifecycle;
   const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic managed attachment' });
   try {
     f.options.resourceLease = lease;
+    await assert.rejects(f.invoke(), /activity lease requires its lifecycle policy/);
+    assert.deepEqual(f.requests, []);
+    f.options.resourceLifecycle = lifecycle;
     await assert.rejects(f.invoke(), { code: 'RESOURCE_NOT_ACTIVATED' });
     assert.deepEqual(f.requests, []);
   } finally {
@@ -811,6 +813,19 @@ test('preloading an inactive lifecycle policy preserves ordinary attachment', as
   assert.equal(attached.exit, 0);
   assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'attached');
   assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
+});
+
+test('a heavy session cannot delegate through the attach CLI before its configuration is loaded', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  await lifecycle.run({ plan: f.plan, operation: 'execute', execute: async resourceSession => {
+    await assert.rejects(main({ ...f.options, resourceSession,
+      args: ['attach', f.plan.id, '--state-dir', f.store, '--version-id', 'manual-draft',
+        '--config', join(f.base, 'missing-config.json')], output() {} }), /dedicated local invocation/);
+    return { state: 'uploaded' };
+  } });
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+  assert.deepEqual(f.requests, []);
 });
 
 async function displaceActivityRecord(f, lifecycle, lease, { replace = false } = {}) {

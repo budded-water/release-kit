@@ -896,9 +896,12 @@ export function createRunner({
       admittedRelease(plan, task, { existingOnly: true, operation: 'attach' }));
     if (resourceSession?.admitAttach) return resourceSession.admitAttach(execute);
     if (resourceSession?.runAttachment) return resourceSession.runAttachment(execute);
-    if (resourceSession || !resourceLifecycle || (!resourceLease && !await hasResourceActivation(store)))
-      return execute(resourceSession);
-    return resourceLifecycle.admitAttach({ plan, lease: resourceLease, execute });
+    if (resourceSession) return execute(resourceSession);
+    if (resourceLease && !resourceLifecycle)
+      throw new Error('Managed attachment with an activity lease requires its lifecycle policy');
+    if (resourceLifecycle && (resourceLease || await hasResourceActivation(store)))
+      return resourceLifecycle.admitAttach({ plan, lease: resourceLease, execute });
+    return execute();
   }
   async function validate(plan, { ui = false } = {}) {
     if (typeof ui !== 'boolean') throw new Error('UI validation selection must be boolean');

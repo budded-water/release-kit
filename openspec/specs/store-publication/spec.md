@@ -111,6 +111,7 @@ upload-only iOS release to an explicit existing manual draft before review.
 - **WHEN** the operator uses ordinary resume, a read-only launcher or dispatch
 - **THEN** it cannot initiate the attachment operation
 - **AND** attachment uses the existing upload checkpoint and locks without creating another release or advancing its approval scope
+- **AND** an existing resource task can delegate attachment through the runner API, while the CLI requires its own local invocation
 
 #### Scenario: Managed attachment admission
 - **WHEN** the installed local entry requests attachment from an activated state root using its active activity lease
