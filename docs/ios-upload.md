@@ -75,8 +75,8 @@ operation supports manual drafts in `PREPARE_FOR_SUBMISSION` and refuses to
 replace a different selected build.
 
 The first write requires the existing production source gate and, when configured,
-prepared Apple content verification. The draft snapshot and relationship read
-must agree. The runner rechecks the build and current source before saving
+prepared Apple content verification. Before a write, version inventory, the
+draft snapshot and the relationship read must agree. The runner rechecks the build and current source before saving
 `ios-attach` intent and making one Apple build relationship PATCH.
 Exit `0` means a separate read confirmed the exact attachment, including when the
 same build was already selected. Exit `2` means the operation was refused or the
@@ -94,7 +94,8 @@ recorded build through independent draft and relationship reads. A confirmed att
 use the existing unsubmitted-upload handoff when fresh provider evidence still
 matches the recorded build and independently confirms the recorded draft
 relationship or that the draft was deleted. An unresolved attachment blocks ownership transfer, including
-when an observation reports a terminal outcome. `attach` itself changes only the build linkage. It does not
+when an observation reports a terminal outcome. A confirmed attachment also
+requires a fresh matching terminal observation before a terminal-state transfer. `attach` itself changes only the build linkage. It does not
 schedule work, run Fastlane, upload, change release settings or submit for review.
 
 The runner method is `runner.attachBuild(plan, { versionId })`. It uses the same

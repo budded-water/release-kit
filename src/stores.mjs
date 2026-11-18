@@ -1458,6 +1458,13 @@ export async function attachStoreBuild(ctx, { versionId } = {}) {
       throw new StoreError('The draft build relationship is unavailable, inconsistent or points to a different build.');
     return selected;
   };
+  const readBeforeWrite = async () => {
+    const listed = observed.target.relationships?.build?.data;
+    const selected = await readSelection();
+    if (selected === null ? listed !== null : !matchesAppleBuild(listed, buildId))
+      throw new StoreError('The draft inventory and direct build relationship disagree.');
+    return selected;
+  };
   const finish = async (writeAttempted) => {
     ctx.signal?.throwIfAborted();
     if (prior?.state !== 'attached') await save(ctx, 'ios-attach', { state: 'attached', versionId, buildId });
@@ -1465,7 +1472,7 @@ export async function attachStoreBuild(ctx, { versionId } = {}) {
   };
   const unconfirmed = writeAttempted => result(ctx, 'unknown', { versionId, buildId, writeAttempted,
     message: 'Attachment is unconfirmed. Rerun attach with the same draft to reconcile; it will not repeat the write.' });
-  if (await readSelection()) return finish(false);
+  if (await readBeforeWrite()) return finish(false);
   if (prior) return unconfirmed(false);
 
   if (typeof ctx.assertPublicationSource !== 'function')
@@ -1479,7 +1486,7 @@ export async function attachStoreBuild(ctx, { versionId } = {}) {
   // Recheck eligibility after source/content gates and selection immediately before intent.
   const freshBuild = (await request(ctx, `${APPLE}/v1/builds/${segment(buildId)}`, token))?.data;
   if (!validBuild(freshBuild)) throw new StoreError('The uploaded build is no longer eligible for attachment.');
-  if (await readSelection()) return finish(false);
+  if (await readBeforeWrite()) return finish(false);
   await save(ctx, 'ios-attach', { state: 'intent', versionId, buildId });
   try {
     await request(ctx, relationship, token, {
@@ -1520,28 +1527,31 @@ export async function statusStore(ctx) {
         );
       const output = appleResult(ctx, observed);
       const attachment = previous(ctx, 'ios-attach');
-      const proof = output.unsubmittedUpload;
-      if (!attachment || !proof) return output;
+      const terminal = ['available', 'released', 'rejected'].includes(output.state);
+      if (!attachment || (!output.unsubmittedUpload && !terminal)) return output;
 
       const { unsubmittedUpload, ...status } = output;
-      if (attachment.state !== 'attached' || proof.buildId !== attachment.buildId) return status;
-      if (proof.versionId !== null && proof.versionId !== attachment.versionId) return status;
-      const versionId = attachment.versionId;
+      if (attachment.state !== 'attached') return status;
+      const uncertain = terminal ? { ...status, state: 'unknown',
+        message: 'The recorded iOS draft state or build relationship could not be confirmed.' } : status;
+      const { versionId, buildId } = attachment;
+      if (observed.buildId !== buildId || (observed.versionId && observed.versionId !== versionId))
+        return uncertain;
       let draft;
       try {
         draft = (await request(ctx, `${appleDraftResource(versionId)}?include=build`, token))?.data;
       } catch (error) {
-        if (proof.versionId === null && error instanceof StoreError && error.status === 404) return output;
+        if (!observed.versionId && error instanceof StoreError && error.status === 404) return output;
         throw error;
       }
-      if (proof.versionId === null ||
-          !matchesAppleDraft(draft, versionId, proof.version, 'PREPARE_FOR_SUBMISSION')) return status;
-      const agrees = linkage => proof.selectedBuildId === null
-        ? linkage === null
-        : matchesAppleBuild(linkage, attachment.buildId);
-      if (!agrees(draft.relationships?.build?.data)) return status;
+      if (!observed.versionId ||
+          !matchesAppleDraft(draft, versionId, ctx.artifact.version, observed.appleState)) return uncertain;
+      const expected = observed.target?.relationships?.build?.data;
+      const agrees = linkage => expected === null ? linkage === null
+        : matchesAppleBuild(expected, buildId) && matchesAppleBuild(linkage, buildId);
+      if (!agrees(draft.relationships?.build?.data)) return uncertain;
       const linkage = await request(ctx, appleBuildRelationship(versionId), token);
-      return agrees(linkage?.data) ? output : status;
+      return agrees(linkage?.data) ? output : uncertain;
     }
     const token = await googleToken(ctx, cfg);
     const observed = await observePlay(ctx, cfg, token);

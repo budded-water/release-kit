@@ -105,6 +105,7 @@ upload-only iOS release to an explicit existing manual draft before review.
 - **WHEN** a higher build requests an otherwise eligible unsubmitted-upload handoff
 - **THEN** a confirmed attachment permits that handoff only with fresh matching unsubmitted evidence for the saved build and a direct read confirming the saved draft remains pre-review with the expected relationship or confirming its absence
 - **AND** unresolved attachment intent blocks ownership transfer even with a saved terminal outcome
+- **AND** a saved terminal outcome with a confirmed attachment requires fresh terminal verification before ownership transfer
 
 #### Scenario: Explicit local scope
 - **WHEN** the operator uses ordinary resume, a read-only launcher or dispatch

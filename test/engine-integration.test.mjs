@@ -612,7 +612,7 @@ async function attachFixture(t, { managed = false } = {}) {
   const state = () => loadState(releasePath(f.store, f.plan.id));
   const remote = { versionId: 'manual-draft', buildId: 'apple-build', selected: null,
     state: 'PREPARE_FOR_SUBMISSION', releaseType: 'MANUAL', processing: 'VALID', expired: false, relationshipMissing: false, snapshotSelected: undefined, linkageSelected: undefined,
-    inventoryMissing: false, draftDeleted: false, snapshotState: undefined,
+    inventoryMissing: false, inventorySelected: undefined, draftDeleted: false, snapshotState: undefined,
     onPatch: null, onFreshBuild: null };
   const requests = [];
   const build = id => ({ id, type: 'builds', attributes: { version: '1', processingState: remote.processing, expired: remote.expired },
@@ -642,10 +642,13 @@ async function attachFixture(t, { managed = false } = {}) {
     assert.equal(method, 'GET');
     switch (u.pathname) {
       case '/v1/apps/123': return Response.json({ data: { id: '123', type: 'apps', attributes: { bundleId: 'example.synthetic' } } });
-      case '/v1/apps/123/appStoreVersions':
+      case '/v1/apps/123/appStoreVersions': {
         assert.equal(u.searchParams.get('filter[platform]'), 'IOS');
-        return Response.json({ data: remote.inventoryMissing ? [] : [draft()],
-          included: remote.selected && !remote.inventoryMissing ? [build(remote.selected)] : [] });
+        const listed = draft(remote.inventorySelected);
+        const selected = listed.relationships.build.data?.id;
+        return Response.json({ data: remote.inventoryMissing ? [] : [listed],
+          included: selected && !remote.inventoryMissing ? [build(selected)] : [] });
+      }
       case '/v1/builds':
         assert.equal(u.searchParams.get('filter[app]'), '123');
         assert.equal(u.searchParams.get('filter[version]'), '1');
@@ -788,7 +791,7 @@ test('attach honors both locks and only uses an existing managed admission', asy
 
 test('attachment preserves the existing confirmed unsubmitted-upload handoff boundary', async t => {
   const variants = ['confirmed', 'cleared', 'pending', 'pending-terminal', 'replacement-draft',
-    'stale-selection', 'stale-review-state', 'omitted-draft', 'deleted-draft'];
+    'stale-selection', 'stale-review-state', 'omitted-draft', 'deleted-draft', 'confirmed-terminal', 'stale-terminal'];
   for (const variant of variants) await t.test(variant, async t => {
     const f = await attachFixture(t);
     const pending = variant.startsWith('pending');
@@ -807,12 +810,26 @@ test('attachment preserves the existing confirmed unsubmitted-upload handoff bou
       f.remote.draftDeleted = true;
       f.remote.selected = null;
     }
-    const canHandOff = ['confirmed', 'cleared', 'deleted-draft'].includes(variant);
+    const canSupersede = ['confirmed', 'cleared', 'deleted-draft'].includes(variant);
+    const canHandOff = canSupersede || variant === 'confirmed-terminal';
     f.adapters.ios.status = statusStore;
     if (variant === 'pending-terminal') {
       f.remote.processing = 'INVALID';
       await f.cli(['status', f.plan.id, '--remote']);
       assert.equal((await f.state()).outcomes.ios.state, 'rejected');
+    }
+    if (['confirmed-terminal', 'stale-terminal'].includes(variant)) {
+      f.remote.state = 'REJECTED';
+      await f.cli(['status', f.plan.id, '--remote']);
+      assert.equal((await f.state()).outcomes.ios.state, 'rejected');
+      if (variant === 'stale-terminal') {
+        f.remote.snapshotState = 'WAITING_FOR_REVIEW';
+        const observed = await f.adapters.ios.status({
+          platform: 'ios', artifact: (await f.state()).artifacts.ios, plan: f.plan,
+          config: f.config, env: f.options.environment, previous: (await f.state()).checkpoints.ios,
+        });
+        assert.equal(observed.state, 'unknown');
+      }
     }
     await runCommand('git', ['commit', '--allow-empty', '-qm', 'newer source'], { cwd: f.repo });
     const build = f.adapters.ios.build;
@@ -829,8 +846,10 @@ test('attachment preserves the existing confirmed unsubmitted-upload handoff bou
 
     if (canHandOff) {
       assert.equal(result.outcomes.ios.state, 'uploaded');
-      assert.equal(previous.supersededBy.ios.releaseId, next.id);
-      assert.equal(result.supersessions[0].reason, 'confirmed-unsubmitted-upload');
+      if (canSupersede) {
+        assert.equal(previous.supersededBy.ios.releaseId, next.id);
+        assert.equal(result.supersessions[0].reason, 'confirmed-unsubmitted-upload');
+      }
     } else {
       assert.equal(result.outcomes.ios.state, 'blocked');
       assert.equal(previous.supersededBy, undefined);
@@ -883,6 +902,14 @@ test('attach refuses stale provider identity, inactive ownership and scope expan
     assert.equal(f.requests.some(request => request.method !== 'GET'), false);
   }
   f.remote.snapshotSelected = undefined;
+  for (const [listed, selection] of [['apple-build', null], [null, 'apple-build']]) {
+    f.remote.inventorySelected = listed;
+    f.remote.selected = selection;
+    await assert.rejects(f.invoke(), /inventory and direct build relationship disagree/);
+    assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+    assert.equal(f.requests.some(request => request.method !== 'GET'), false);
+  }
+  f.remote.inventorySelected = undefined;
   f.remote.selected = null;
   f.remote.onFreshBuild = () => { f.remote.selected = 'different-build'; };
   await assert.rejects(f.invoke(), /different build/);

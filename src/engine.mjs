@@ -704,12 +704,27 @@ export function createRunner({
         await command('git', ['merge-base', '--is-ancestor', owner.source, state.plan.source], {
           cwd: repo,
         });
-        const previous = await loadState(releasePath(store, owner.id));
+        const previousDirectory = releasePath(store, owner.id);
+        const previous = await loadState(previousDirectory);
         const attachment = platform === 'ios' ? previous?.checkpoints?.ios?.['ios-attach'] : undefined;
         if (attachment && attachment.state !== 'attached')
           throw new Error('Reconcile the pending iOS attachment before transferring publication ownership');
+        const terminalStates = ['available', 'released', 'rejected'];
+        let terminal = terminalStates.includes(previous?.outcomes?.[platform]?.state);
+        if (terminal && attachment) {
+          const unlockPrevious = await acquireLock(join(store, 'locks', `${owner.id}.lock`));
+          try {
+            const saved = await loadState(previousDirectory);
+            const observation = await cleanup.run(() => adapters[platform].status(
+              context(saved, previousDirectory, platform, checkoutDirectory(saved, previousDirectory, platform)),
+            ));
+            terminal = terminalStates.includes(observation.state);
+          } finally {
+            await unlockPrevious();
+          }
+        }
         if (
-          !['available', 'released', 'rejected'].includes(previous?.outcomes?.[platform]?.state) &&
+          !terminal &&
           !(
             ((platform === 'ios' && previous?.storePreparation?.ios?.status === 'prepared') ||
               (platform === 'android' &&
