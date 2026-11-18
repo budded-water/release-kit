@@ -40,13 +40,14 @@ evidence references and native resource controls. Managed consumer bootstraps mu
 adopt the contract before activation; repository merge alone enables nothing.
 
 ## Non-goals
-No implementation or deletion in this proposal. No automatic enrollment of legacy
+No automatic enrollment of legacy
 directories, broad home-directory cleanup, OS swap manipulation, runtime-image
 uninstallation, service shutdown, scheduled daemon, shared writable DerivedData,
 cross-release evidence shortcut, remote artifact service or provider replay.
 No filesystem-space savings or build-speed claim follows from directory size.
 
 ## Delivery boundary
-This is a proposed contract, not implemented behavior. Implementation, synthetic
-acceptance, consumer integration and authorized installed rollout are separate
-tasks. Publication authorization and review/release gates remain unchanged.
+Core implementation and consumer source adoption have landed. The task checklist
+tracks remaining measured policy and authorized installed rollout; source acceptance
+and copied-installation rehearsals do not activate an existing installation.
+Publication authorization and review/release gates remain unchanged.
