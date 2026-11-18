@@ -239,15 +239,15 @@ function metadataFacts(data) {
     try { return ['https:', 'http:'].includes(new URL(value).protocol); } catch { return false; }
   };
   const info = data.appInfo;
-  const locales = Array.isArray(data.languages) ? data.languages : null;
-  if (locales && (locales.length > 1000 || locales.some(entry => !object(entry))))
+  const locales = data.languages;
+  if (!Array.isArray(locales) || locales.length > 1000 || locales.some(entry => !object(entry)))
     throw new AgcError('AGC_RESPONSE', 'AGC localization metadata is malformed or exceeds its bound.');
   return {
     privacyWebUrl: web(info.privacyPolicy),
     reviewAccessPresent: present(info.testUserName) && present(info.testUserPassword),
-    localizations: locales?.map(entry => {
+    localizations: locales.map(entry => {
       const locale = typeof entry?.lang === 'string' && /^[A-Za-z0-9_-]{2,35}$/.test(entry.lang) ? entry.lang : null;
       return { locale, namePresent: present(entry.appName), descriptionPresent: present(entry.appDesc) };
-    }) ?? null,
+    }),
   };
 }

@@ -41,7 +41,10 @@ additional approved capabilities. Harmony may report syntax/presence/count facts
 from the already-read app-info; contacts, review credentials, private URLs and
 identity documents never leave the collector. Presence does not prove approval or
 actual reviewer access. Unobserved/unsupported checks remain explicit; no preflight
-can authorize publication or claim complete store readiness.
+can authorize publication or claim complete store readiness. Harmony preflight
+requires the documented languages array: absent/non-array data makes the read
+incomplete, while an explicit empty array is a valid observation of missing
+localization. Status-only observations remain independent of listing metadata.
 
 Each operation owns a bounded overall deadline and propagates parent cancellation
 through authentication, command execution and reads. Late responses cannot produce

@@ -245,5 +245,10 @@ is a read-only POST and was used separately to discover the exact test version I
 for operational acceptance. Its existence does not make `store-versions` support
 Harmony or change the GET-only transport of the implemented Harmony query.
 
+Harmony preflight requires the documented localization array to be present and
+well formed. An omitted/non-array collection is an incomplete read with sanitized
+diagnostics and CLI exit 2; an explicit empty array is a complete observation of
+missing listing data. Status-only queries do not require listing metadata.
+
 Store-read dispatch remains independent of task-resource lifecycle admission,
 leases and reclamation; the shared CLI does not activate those hooks for reads.

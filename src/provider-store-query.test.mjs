@@ -262,6 +262,46 @@ test('Harmony review queue is separate from approval and malformed localization 
   }
 });
 
+test('Harmony preflight rejects missing or non-array languages while an empty list is a complete missing observation', async t => {
+  const f = await fixture(t), config = join(f.root, 'stores.json');
+  await writeFile(config, JSON.stringify({ schemaVersion: 1, stores: { harmony: f.harmony.store } }));
+  t.mock.method(globalThis, 'fetch', f.harmony.fetch);
+  const cli = async releaseType => {
+    let report;
+    const exit = await main({ repo: '/missing-project', args: ['store-preflight', '--provider', 'appgallery-connect',
+      '--config', config, '--release-type', String(releaseType), '--version-id', '99'],
+      environment: f.harmony.environment, output: s => report = JSON.parse(s) });
+    return { exit, report };
+  };
+  for (const releaseType of [1, 6]) {
+    for (const languages of [undefined, null, { privateValue }]) {
+      f.languages = languages;
+      const query = await getHarmonyRelease({ ...f.harmony, releaseType });
+      assert.equal(query.observationComplete, true);
+      const api = await inspectProviderStore({ ...f.harmony, releaseType, provider: 'appgallery-connect' });
+      const result = await cli(releaseType);
+      assert.equal(result.exit, 2);
+      for (const report of [api, result.report]) {
+        assert.equal(report.observationComplete, false);
+        assert.equal(report.resolution, 'unavailable');
+        assert.equal(report.metadata, undefined);
+        assert.ok(report.errors.some(error => error.code === 'AGC_RESPONSE'));
+        assert.equal(report.publicReleaseReady, false);
+        assert.equal(JSON.stringify(report).includes(privateValue), false);
+      }
+    }
+    f.languages = [];
+    const result = await cli(releaseType);
+    assert.equal(result.exit, 0);
+    assert.equal(result.report.observationComplete, true);
+    assert.equal(result.report.resolution, 'found');
+    assert.deepEqual(result.report.metadata.localizations, []);
+    assert.equal(result.report.checks.find(check => check.code === 'listing-localizations').status, 'missing');
+    assert.equal(result.report.conclusion, 'blocked');
+    assert.equal(result.report.publicReleaseReady, false);
+  }
+});
+
 test('provider preflight projects metadata only as presence and remains incomplete for unsupported guarantees', async t => {
   const f = await fixture(t);
   for (const [provider, options] of [['google-play', f.play], ['appgallery-connect', f.harmony]]) {
