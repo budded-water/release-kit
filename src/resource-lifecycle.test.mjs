@@ -491,6 +491,34 @@ test('compatible restart preserves the feature fence and incompatible policy can
   assert.deepEqual(await readFile(marker), original);
 });
 
+test('dotted keys, wildcard objects and custom diagnostic lookalikes still protect actual cache inputs', async t => {
+  const variants = {
+    'dotted root key': (state, path) => { state['retiredBuilds.*.stage.error'] = path; },
+    'dotted parent key': (state, path) => { state['retiredBuilds.*'] = { stage: { error: path } }; },
+    'wildcard object': (state, path) => { state.retiredBuilds = { '*': { stage: { error: path } } }; },
+    'numeric object': (state, path) => { state.retiredBuilds = { '0': { stage: { error: path } } }; },
+    'custom stage': (state, path) => { state.stages.custom = { status: 'succeeded', error: path }; },
+    'custom acceptance map': (state, path) => { state.acceptanceStatus = { custom: { error: path } }; },
+  };
+  for (const [name, reference] of Object.entries(variants)) {
+    await t.test(name, async t => {
+      const f = await fixture(t);
+      let input;
+      const result = await f.lifecycle.run({ plan, operation: 'validate', execute: async session => {
+        const cache = await session.prepareCache('compiler', f.workspace);
+        input = join(cache, 'required.o');
+        await writeFile(input, '0123456789abcdef');
+        reference(f.state, input);
+        await saveState(releasePath(f.store, plan.id), f.state);
+      } });
+      assert.equal(result.maintenance.observationComplete, true);
+      assert.equal(result.maintenance.outcome, 'protected-capacity');
+      assert.ok(result.maintenance.resources[0].reasons.includes('retained-reference'));
+      assert.equal(await readFile(input, 'utf8'), '0123456789abcdef');
+    });
+  }
+});
+
 test('the independent session finalizer deadline rejects and retains ownership when the adapter never settles', async t => {
   let started;
   const entered = new Promise(resolve => { started = resolve; });

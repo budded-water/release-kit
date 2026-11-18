@@ -10,12 +10,17 @@ const pathKey = key => ['path', 'file', 'directory', 'root', 'cwd', 'receipt', '
 // These schema-v1 fields are written by the engine's error formatter. Their
 // strings preserve diagnostics, not file dependencies. Custom fields, including
 // custom `error`/`message` fields, retain the conservative reference rules.
+const platform = key => ['ios', 'android', 'harmony'].includes(key);
+const engineStage = key => ['install-validation', 'checks', 'ui-eval'].includes(key) ||
+  typeof key === 'string' && /^(?:preflight|install|doctor|build|publish|upload)-(?:ios|android|harmony)$/.test(key);
 const diagnosticField = path =>
   path.length === 2 && ['sourceValidation', 'uiValidation'].includes(path[0]) && path[1] === 'error' ||
-  path.length === 3 && ['stages', 'acceptanceStatus'].includes(path[0]) && path[2] === 'error' ||
+  path.length === 3 && path[0] === 'stages' && engineStage(path[1]) && path[2] === 'error' ||
+  path.length === 3 && path[0] === 'acceptanceStatus' && platform(path[1]) && path[2] === 'error' ||
   path.length === 3 && ['outcomes', 'observations'].includes(path[0]) &&
-    ['ios', 'android', 'harmony'].includes(path[1]) && path[2] === 'message' ||
-  path.join('.') === 'retiredBuilds.*.stage.error';
+    platform(path[1]) && path[2] === 'message' ||
+  path.length === 4 && path[0] === 'retiredBuilds' && Number.isInteger(path[1]) &&
+    path[2] === 'stage' && path[3] === 'error';
 
 // All retained snapshots participate. The adapter additionally verifies referenced
 // reports; parsing release JSON alone cannot prove those files contain no inputs.
@@ -51,7 +56,7 @@ export async function inspectResourceReferences(store, adapter, { signal, timeou
         throw resourceError('RESOURCE_BUDGET', 'Reference complexity budget exhausted');
       for (const [childKey, child] of Object.entries(value))
         collect(child, Array.isArray(value) ? key : childKey, depth + 1,
-          [...path, Array.isArray(value) ? '*' : childKey]);
+          [...path, Array.isArray(value) ? Number(childKey) : childKey]);
     }
   }
   const releases = join(store, 'releases');
