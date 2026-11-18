@@ -57,7 +57,19 @@ with explicit unsupported facts and without claiming full publication readiness.
 - **THEN** only approved presence/syntax/count facts leave the collector and neither
   private values nor free-text provider diagnostics enter reports
 
-#### Scenario: Required Harmony localization collection
-- **WHEN** a Harmony preflight response omits the required languages array or returns a non-array value
-- **THEN** observation is incomplete with sanitized diagnostics and the CLI returns exit code 2
-- **AND** an explicit empty array remains a complete observation of missing localization, while status-only reads do not require listing metadata
+#### Scenario: Missing or malformed Harmony localization collection
+- **WHEN** a Harmony preflight response omits the required languages array,
+  returns a non-array value, contains non-object entries or exceeds 1000 entries
+- **THEN** observation is incomplete with sanitized diagnostics, resolution is
+  unavailable and the CLI returns exit code 2
+
+#### Scenario: Explicitly empty Harmony localization collection
+- **WHEN** the required languages array is empty and the selected-version observations otherwise complete
+- **THEN** the observation is complete, listing-localizations is missing, the
+  assessment is blocked and the CLI returns exit code 0
+- **AND** publicReleaseReady remains false
+
+#### Scenario: Harmony status independent of localization
+- **WHEN** a caller requests status alone for an otherwise valid bounded selected-version response
+- **THEN** missing or malformed listing localization does not make the status read incomplete
+- **AND** the status reader does not require or assess listing metadata

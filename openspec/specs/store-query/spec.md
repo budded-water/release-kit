@@ -58,15 +58,27 @@ their interpretation from publication, build matching and query completion.
 The system SHALL expose standalone Google Play and Harmony release queries without
 a project module, build or journal, preserving existing default Apple commands.
 
-#### Scenario: Exact Play release in an explicit track
-- **WHEN** a caller queries a package, track and versionCode
-- **THEN** the reader uses only that track's bounded nonobsolete summaries and
-  distinguishes one match, multiple matches and not-observed within that scope
+#### Scenario: Play inventory and exact release in an explicit track
+- **WHEN** a caller queries one package and track for inventory or exact versionCode status
+- **THEN** the reader accepts at most 20 nonobsolete release summaries from that track
+- **AND** exact lookup distinguishes one match, multiple matches and not-observed
+  only within that accepted selected-track coverage
+
+#### Scenario: Over-limit Play response
+- **WHEN** the selected track returns more than 20 release summaries
+- **THEN** the observation is incomplete with read diagnostics, without silently
+  truncating the response into a successful inventory
+- **AND** exact lookup resolves unavailable rather than not-observed
 
 #### Scenario: Exact Harmony formal or test version
 - **WHEN** a caller selects app identity, releaseType and versionId
 - **THEN** package and returned version identity must match and the raw lifecycle
   is interpreted within that release type without another-version fallback
+
+#### Scenario: Harmony test availability is not formal publication
+- **WHEN** Harmony reports available raw state 0 for an exact selected formal or test version
+- **THEN** releaseType 1 yields published evidence and releaseType 6 yields testing evidence
+- **AND** available test evidence does not establish publication of a formal version
 
 #### Scenario: Unsupported inventory or selectors
 - **WHEN** Harmony inventory or incompatible provider selectors are requested
