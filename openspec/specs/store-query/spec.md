@@ -23,7 +23,8 @@ ASC authentication.
 - **THEN** each operation validates its own remote bundle identity and isolates its session
 
 ### Requirement: Exact resolution and honest coverage
-The system SHALL distinguish found, not-found, ambiguous and unavailable results.
+The App Store Connect reader SHALL distinguish found, not-found, ambiguous and
+unavailable results.
 
 #### Scenario: Different sole version
 - **WHEN** a requested version is absent but a different sole version exists
@@ -38,8 +39,8 @@ The system SHALL distinguish found, not-found, ambiguous and unavailable results
 - **THEN** resolution is ambiguous and no build is attributed to the candidate
 
 ### Requirement: Distinct lifecycle and build evidence
-The system SHALL retain bounded raw version states and separate their interpretation
-from publication, build matching and query completion.
+The App Store Connect reader SHALL retain bounded raw version states and separate
+their interpretation from publication, build matching and query completion.
 
 #### Scenario: Unknown or missing state
 - **WHEN** the provider returns a new state or omits the state
