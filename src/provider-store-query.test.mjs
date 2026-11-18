@@ -232,8 +232,9 @@ test('Harmony inventory sends only the bound signed reads and projects formal/te
   f.versionList = [
     { versionId: '900719925474099301', releaseType: 6, state: 0, auditInfo: privateValue,
       packageList: [{ versionCode: 42, versionName: '1.0', packageId: privateValue }] },
-    { versionId: '88', releaseType: 1, state: 0 },
+    { versionId: '900719925474099301', state: 0 },
     { versionId: '99', releaseType: 6, state: 999, packageList: [] },
+    { versionId: '100', releaseType: 6 },
     { releaseType: 7, privateValue },
   ];
   const report = await listHarmonyReleases(f.harmony);
@@ -242,7 +243,8 @@ test('Harmony inventory sends only the bound signed reads and projects formal/te
   assert.equal(report.excludedReleaseCount, 1);
   assert.deepEqual(report.target, { provider: 'appgallery-connect', platform: 'HARMONY', appId: '123', bundleId: 'example.a', region: 'CN' });
   assert.deepEqual(report.versions.map(v => [v.versionId, v.releaseType, v.rawState, v.publicationState]),
-    [['900719925474099301', 6, 0, 'testing'], ['88', 1, 0, 'published'], ['99', 6, 999, 'unknown']]);
+    [['900719925474099301', 6, 0, 'testing'], ['900719925474099301', 1, 0, 'published'],
+      ['99', 6, 999, 'unknown'], ['100', 6, null, 'unknown']]);
   assert.equal(report.versions[2].reviewState, 'unknown');
   assert.deepEqual(report.versions[0].packages, [{ version: '1.0', versionCode: 42 }]);
   assert.equal(report.versions[1].packages, undefined);
@@ -251,6 +253,21 @@ test('Harmony inventory sends only the bound signed reads and projects formal/te
   assert.deepEqual(f.calls.map(c => c.init.method), ['GET', 'POST']);
   assert.equal(f.calls[0].url, 'https://connect-api.cloud.huawei.com/api/publish/v2/appid-list?packageName=example.a&packageTypes=7');
   assert.equal(f.calls[1].url, 'https://connect-api.cloud.huawei.com/api/publish/v3/version/brief-info/list');
+});
+
+test('Harmony inventory keeps the validated app identity if the caller changes its config during the read', async t => {
+  const f = await fixture(t);
+  f.versionList = [{ versionId: '99', releaseType: 6, state: 0 }];
+  const pending = listHarmonyReleases(f.harmony);
+  Object.assign(f.harmony.store, { appId: '456', bundleId: 'example.changed' });
+  const report = await pending;
+  assert.equal(report.observationComplete, true);
+  assert.equal(report.target.appId, '123');
+  assert.equal(report.target.bundleId, 'example.a');
+  assert.equal(report.versions[0].versionId, '99');
+  assert.equal(new URL(f.calls[0].url).searchParams.get('packageName'), 'example.a');
+  assert.equal(f.calls[1].init.headers.appId, '123');
+  assert.deepEqual(JSON.parse(f.calls[1].init.body), { packageName: 'example.a' });
 });
 
 test('Harmony inventory distinguishes valid empty scope from malformed or unavailable provider data', async t => {
@@ -263,8 +280,9 @@ test('Harmony inventory distinguishes valid empty scope from malformed or unavai
     assert.equal(result.excludedReleaseCount, list.length);
   }
   const valid = { versionId: '99', releaseType: 6, state: 0 };
-  for (const list of [undefined, null, {}, [null], [{ ...valid, releaseType: undefined }],
-    [{ ...valid, versionId: 99 }], [{ ...valid, state: undefined }], [valid, valid],
+  for (const list of [undefined, null, {}, [null], [{ ...valid, releaseType: null }],
+    [{ ...valid, versionId: 99 }], [{ ...valid, state: null }], [valid, valid],
+    [{ versionId: '99', state: 0 }, { versionId: '99', releaseType: 1, state: 0 }],
     [valid, { ...valid, versionId: '100', packageList: [{ versionCode: privateValue }] }],
     Array.from({ length: 1001 }, (_, i) => ({ ...valid, versionId: String(i + 1) }))]) {
     f.versionList = list;
@@ -279,15 +297,31 @@ test('Harmony inventory distinguishes valid empty scope from malformed or unavai
   assert.equal(denied.observationComplete, false);
   assert.equal(denied.errors[0].code, 'AGC_HTTP_403');
   assert.equal(JSON.stringify(denied).includes(privateValue), false);
-  const oversized = await listHarmonyReleases({ ...f.harmony, fetch: (url, init) => init.method === 'POST'
-    ? Promise.resolve(new Response(new Uint8Array(4 * 1024 * 1024 + 1))) : f.harmony.fetch(url, init) });
-  assert.equal(oversized.observationComplete, false);
-  assert.equal(oversized.errors[0].code, 'AGC_RESPONSE');
   f.calls.length = 0;
   f.appids = [{ value: '321' }];
   const mismatch = await listHarmonyReleases(f.harmony);
   assert.equal(mismatch.errors[0].code, 'AGC_IDENTITY');
   assert.equal(f.calls.length, 1);
+});
+
+test('Harmony inventory enforces body and per-version package bounds on otherwise valid responses', async t => {
+  const f = await fixture(t);
+  const valid = { versionId: '99', releaseType: 6, state: 0 };
+  const start = JSON.stringify({ ret: { code: 0 }, versionList: [valid] });
+  const maxBytes = 4 * 1024 * 1024;
+  for (const size of [maxBytes, maxBytes + 1]) {
+    const report = await listHarmonyReleases({ ...f.harmony, fetch: (url, init) => init.method === 'POST'
+      ? Promise.resolve(new Response(start.padEnd(size, ' '))) : f.harmony.fetch(url, init) });
+    assert.equal(report.observationComplete, size === maxBytes);
+    assert.equal(report.versions.length, size === maxBytes ? 1 : 0);
+  }
+  for (const size of [1000, 1001]) {
+    f.versionList = [{ ...valid, packageList: Array.from({ length: size }, (_, versionCode) => ({ versionCode })) }];
+    const report = await listHarmonyReleases(f.harmony);
+    assert.equal(report.observationComplete, size === 1000);
+    if (size === 1000) assert.equal(report.versions[0].packages.length, 1000);
+    else assert.deepEqual(report.versions, []);
+  }
 });
 
 test('Harmony inventory rejects a late list response and propagates caller cancellation', async t => {
@@ -433,15 +467,18 @@ test('standalone multi-provider CLI uses explicit config without Expo or state a
   f.releases = [row('NOT_APPROVED')];
   const status = await run(['store-status', '--provider', 'google-play', '--track', 'production', '--version-code', '42']);
   assert.equal(status.exit, 0); assert.equal(status.report.release.reviewState, 'rejected');
-  f.versionList = [{ versionId: '99', releaseType: 6, state: 4 }];
+  f.versionList = [{ versionId: '99', state: 4 }, { versionId: '99', releaseType: 6, state: 4 }];
   const listing = await run(['store-versions', '--provider', 'appgallery-connect']);
   assert.equal(listing.exit, 0);
-  const [candidate] = listing.report.versions;
+  const [candidate, testCandidate] = listing.report.versions;
+  assert.equal(candidate.releaseType, 1);
+  assert.equal(testCandidate.releaseType, 6);
   const selectors = ['--release-type', String(candidate.releaseType), '--version-id', candidate.versionId];
   const harmonyStatus = await run(['store-status', '--provider', 'appgallery-connect', ...selectors]);
   assert.equal(harmonyStatus.exit, 0);
   assert.equal(harmonyStatus.report.release.versionId, candidate.versionId);
-  const preflight = await run(['store-preflight', '--provider', 'appgallery-connect', ...selectors]);
+  const preflight = await run(['store-preflight', '--provider', 'appgallery-connect',
+    '--release-type', String(testCandidate.releaseType), '--version-id', testCandidate.versionId]);
   f.versionList = undefined;
   const unavailable = await run(['store-versions', '--provider', 'appgallery-connect']);
   assert.equal(unavailable.exit, 2);

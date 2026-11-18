@@ -37,7 +37,8 @@ function settings(ctx) {
       'AGC_IDENTITY',
       'Configured Harmony bundle identity differs from the inspection target.',
     );
-  return cfg;
+  // Bind the validated app and selectors across signing and network awaits.
+  return { ...cfg };
 }
 
 async function token(ctx, cfg) {
@@ -161,13 +162,15 @@ function versionSummaries(data) {
   const identities = new Set();
   let excludedReleaseCount = 0;
   for (const row of rows) {
-    if (!object(row) || !Number.isSafeInteger(row.releaseType) || row.releaseType < 1) throw invalid();
-    if (![1, 6].includes(row.releaseType)) {
+    if (!object(row)) throw invalid();
+    // AGC documents formal (1) as the default when releaseType is omitted.
+    const { versionId, releaseType = 1, state, packageList } = row;
+    if (!Number.isSafeInteger(releaseType) || releaseType < 1) throw invalid();
+    if (![1, 6].includes(releaseType)) {
       excludedReleaseCount++;
       continue;
     }
-    const { versionId, releaseType, state, packageList } = row;
-    if (!id(versionId) || !Number.isSafeInteger(state) || state < 0) throw invalid();
+    if (!id(versionId) || (state !== undefined && (!Number.isSafeInteger(state) || state < 0))) throw invalid();
     const identity = `${releaseType}:${versionId}`;
     if (identities.has(identity)) throw invalid();
     identities.add(identity);

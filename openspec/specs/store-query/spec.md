@@ -130,6 +130,11 @@ Service Account and verifying the package-to-app mapping before listing versions
 - **THEN** the reader performs the bounded package lookup GET and the single documented read-only version-list POST for that app and package
 - **AND** the report includes string versionIds, release types, raw and interpreted lifecycle states and optional package version summaries, so formal/test records can be passed to the existing exact reader
 - **AND** other release types are counted and omitted, provider order is preserved, and coverage applies only to the returned formal/test inventory
+- **AND** an omitted release type uses the documented formal default (1), while an omitted lifecycle state remains unknown
+
+#### Scenario: App identity remains bound throughout a read
+- **WHEN** a caller changes its config object while the read is pending
+- **THEN** lookup, inventory request and report retain the app and package verified at the start
 
 #### Scenario: Empty inventory
 - **WHEN** the provider explicitly returns an empty list or only other release types

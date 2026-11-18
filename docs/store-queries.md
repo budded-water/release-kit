@@ -255,7 +255,8 @@ controllers, activate lifecycle policy or perform store writes.
 Harmony inventory coverage is `cn-harmony-returned-formal-test-versions`. It
 preserves provider order and exposes each supported `releaseType`/`versionId` pair
 as exact detail selectors. IDs remain strings. Entries include raw and interpreted
-lifecycle and, when supplied, package version names/codes. Other release types are
+lifecycle and, when supplied, package version names/codes. An omitted release
+type uses Huawei’s formal default (`1`). An omitted state remains unknown. Other release types are
 counted under `excludedReleaseCount`. The query accepts at most 1,000 returned
 records and 1,000 package summaries per supported record. Empty inventory is a
 successful scoped observation. Malformed, duplicate or over-limit supported
