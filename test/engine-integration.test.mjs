@@ -611,7 +611,7 @@ async function attachFixture(t, { managed = false } = {}) {
   assert.equal(await f.cli(['upload', f.plan.id]), 0);
   const state = () => loadState(releasePath(f.store, f.plan.id));
   const remote = { versionId: 'manual-draft', buildId: 'apple-build', selected: null,
-    state: 'PREPARE_FOR_SUBMISSION', releaseType: 'MANUAL', processing: 'VALID', expired: false, relationshipMissing: false, snapshotSelected: undefined,
+    state: 'PREPARE_FOR_SUBMISSION', releaseType: 'MANUAL', processing: 'VALID', expired: false, relationshipMissing: false, snapshotSelected: undefined, linkageSelected: undefined,
     onPatch: null, onFreshBuild: null };
   const requests = [];
   const build = id => ({ id, type: 'builds', attributes: { version: '1', processingState: remote.processing, expired: remote.expired },
@@ -657,7 +657,7 @@ async function attachFixture(t, { managed = false } = {}) {
         assert.equal(u.searchParams.get('include'), 'build');
         return Response.json({ data: draft(remote.snapshotSelected) });
       case '/v1/appStoreVersions/manual-draft/relationships/build':
-        return Response.json(remote.relationshipMissing ? {} : { data: draft().relationships.build.data });
+        return Response.json(remote.relationshipMissing ? {} : { data: draft(remote.linkageSelected).relationships.build.data });
       default: throw new Error('Unexpected synthetic request');
     }
   });
@@ -784,14 +784,21 @@ test('attach honors both locks and only uses an existing managed admission', asy
 });
 
 test('attachment preserves the existing confirmed unsubmitted-upload handoff boundary', async t => {
-  for (const variant of ['confirmed', 'cleared', 'pending', 'replacement-draft']) await t.test(variant, async t => {
+  for (const variant of ['confirmed', 'cleared', 'pending', 'pending-terminal', 'replacement-draft', 'stale-selection']) await t.test(variant, async t => {
     const f = await attachFixture(t);
-    if (variant === 'pending') f.remote.onPatch = () => new Response(null, { status: 204 });
-    assert.equal((await f.invoke()).exit, variant === 'pending' ? 2 : 0);
+    const pending = variant.startsWith('pending');
+    if (pending) f.remote.onPatch = () => new Response(null, { status: 204 });
+    assert.equal((await f.invoke()).exit, pending ? 2 : 0);
     if (variant === 'replacement-draft') f.remote.versionId = 'other-draft';
     if (variant === 'cleared') f.remote.selected = null;
+    if (variant === 'stale-selection') f.remote.linkageSelected = 'another-build';
     const canHandOff = ['confirmed', 'cleared'].includes(variant);
     f.adapters.ios.status = statusStore;
+    if (variant === 'pending-terminal') {
+      f.remote.processing = 'INVALID';
+      await f.cli(['status', f.plan.id, '--remote']);
+      assert.equal((await f.state()).outcomes.ios.state, 'rejected');
+    }
     await runCommand('git', ['commit', '--allow-empty', '-qm', 'newer source'], { cwd: f.repo });
     const build = f.adapters.ios.build;
     f.adapters.ios.build = async ctx => ({ ...await build(ctx), buildNumber: '2' });
@@ -810,7 +817,7 @@ test('attachment preserves the existing confirmed unsubmitted-upload handoff bou
       assert.equal(previous.supersededBy, undefined);
       assert.equal(result.checkpoints.ios?.['ios-upload'], undefined);
     }
-    assert.equal(previous.checkpoints.ios['ios-attach'].state, variant === 'pending' ? 'intent' : 'attached');
+    assert.equal(previous.checkpoints.ios['ios-attach'].state, pending ? 'intent' : 'attached');
     assert.equal(JSON.parse(await readFile(f.owner, 'utf8')).id, canHandOff ? next.id : f.plan.id);
     assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
   });

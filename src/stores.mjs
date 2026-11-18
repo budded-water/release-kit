@@ -1499,12 +1499,26 @@ export async function statusStore(ctx) {
     const cfg = settings(ctx);
     identity(ctx);
     if (ctx.platform === 'ios') {
-      const observed = await observeApple(ctx, cfg, await appleToken(ctx, cfg));
+      const token = await appleToken(ctx, cfg);
+      const observed = await observeApple(ctx, cfg, token);
       if ((observed.build || observed.upload) && !previous(ctx, 'ios-upload'))
         throw new StoreError(
           'Remote build identity has no matching upload journal; artifact ownership is unverified.',
         );
-      return appleResult(ctx, observed);
+      const output = appleResult(ctx, observed);
+      const attachment = previous(ctx, 'ios-attach');
+      const proof = output.unsubmittedUpload;
+      if (!attachment || !proof) return output;
+
+      const { unsubmittedUpload, ...status } = output;
+      if (attachment.state !== 'attached' || proof.buildId !== attachment.buildId) return status;
+      if (proof.versionId === null) return output;
+      if (proof.versionId !== attachment.versionId) return status;
+      const linkage = await request(ctx, appleBuildRelationship(proof.versionId), token);
+      const agrees = proof.selectedBuildId === null
+        ? linkage?.data === null
+        : matchesAppleBuild(linkage?.data, attachment.buildId);
+      return agrees ? output : status;
     }
     const token = await googleToken(ctx, cfg);
     const observed = await observePlay(ctx, cfg, token);

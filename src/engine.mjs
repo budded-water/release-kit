@@ -705,6 +705,9 @@ export function createRunner({
           cwd: repo,
         });
         const previous = await loadState(releasePath(store, owner.id));
+        const attachment = platform === 'ios' ? previous?.checkpoints?.ios?.['ios-attach'] : undefined;
+        if (attachment && attachment.state !== 'attached')
+          throw new Error('Reconcile the pending iOS attachment before transferring publication ownership');
         if (
           !['available', 'released', 'rejected'].includes(previous?.outcomes?.[platform]?.state) &&
           !(

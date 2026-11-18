@@ -92,8 +92,9 @@ its prior upload-only behavior. Explicit full publication requires a confirmed a
 attempted. The built-in iOS publisher verifies the recorded build through
 the draft relationship endpoint before proceeding. A confirmed attachment can
 use the existing unsubmitted-upload handoff when fresh provider evidence still
-matches the recorded build and any surviving draft. An unresolved attachment
-blocks that handoff. `attach` itself changes only the build linkage. It does not
+matches the recorded build and independently confirms any surviving draft
+relationship. An unresolved attachment blocks ownership transfer, including
+when an observation reports a terminal outcome. `attach` itself changes only the build linkage. It does not
 schedule work, run Fastlane, upload, change release settings or submit for review.
 
 The runner method is `runner.attachBuild(plan, { versionId })`. It uses the same
