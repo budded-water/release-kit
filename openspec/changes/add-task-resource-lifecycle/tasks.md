@@ -8,7 +8,7 @@ proposal/schema validation alone never authorizes deletion.
 - [x] Define the resource event schema, generation identity, index recovery and bounded reports; preserve release/request identities and journal bytes.
 - [x] Freeze reclaim CLI/API inputs and distinct success, protected/capacity, incomplete and cancellation outcomes; retain existing storage read contracts.
 - [x] Define trusted adapter registration, reconstruction/reference rules, source-cleanliness checks and exact intermediate leaves; reject arbitrary target paths and candidate-selected hooks.
-- [ ] Define the stable feature fence, old-control refusal, disable behavior and safe rollback/reconstruction procedure before enabling mutation.
+- [x] Define the stable feature fence, old-control refusal, disable behavior and safe rollback/reconstruction procedure before enabling mutation. Quiescing preserves the fence; installed snapshot/restore acceptance remains open.
 - [ ] Define positive cache budget, phase allocation estimates and free-space policy from measured consumer workloads; do not infer authority from TTL.
 
 ## 2. Implement lifecycle and admission
@@ -28,14 +28,14 @@ proposal/schema validation alone never authorizes deletion.
 - [x] Preserve dry-run as no-write/no-stop and report task success independently from deferred or failed maintenance.
 
 ## 4. Verify at actual boundaries
-- [ ] Use real temporary files, durable event writes and separate OS processes to test competing admission, maintenance transitions and reservation accounting.
-- [ ] Inject crashes before/after registration, intent, reuse revocation, partial deletion, deletion completion and admission/settlement handoff.
-- [ ] Test stale owners, unknown children, cancellation, ledger corruption/ENOSPC, interrupted completion writes and missing/replaced generations.
-- [ ] Inject task-result/evidence/pending-disposition ENOSPC or verification failure before teardown; prove bounded owned-session cleanup still runs, the original error survives, disk resources stay intact and uncertain owners retain their fences.
+- [x] Use real temporary files, durable event writes and separate OS processes to test competing admission, maintenance transitions and reservation accounting.
+- [x] Inject crashes before/after registration, intent, reuse revocation, partial deletion, deletion completion and admission/settlement handoff. SIGKILL tests cover process interruption, not hardware power-loss durability.
+- [x] Test stale owners, unknown children, cancellation, ledger corruption/ENOSPC, interrupted completion writes and missing/replaced generations.
+- [x] Inject task-result/evidence/pending-disposition ENOSPC or verification failure before teardown; prove bounded owned-session cleanup still runs, the original error survives, disk resources stay intact and uncertain owners retain their fences. Filesystem-call fault injection is not a physically full production volume.
 - [ ] Test cross-release/historical/relative references, legacy policy, symlink/ancestor replacement, mount/link ambiguity and evidence preservation.
 - [x] Test resume after reclamation and unchanged native-build/upload/submission/publication idempotency; no provider writes during collection. Synthetic providers verify checkpoint preservation; real native/provider acceptance remains in rollout.
 - [ ] Test exact API/CLI dry-run/read-only behavior, bounded reports, secret omission, old-control refusal and safe disable/rollback.
-- [ ] Exercise two synthetic project adapters and repeated generations, including protected-overage and interrupted-recovery cases.
+- [x] Exercise two synthetic project adapters and repeated generations, including protected-overage and interrupted-recovery cases.
 - [x] Run required repository checks, packed pnpm/npm consumer verification and independent final-head review; inspect behavioral test quality for implementation.
 
 ## 5. Consumer integration and authorized rollout

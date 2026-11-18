@@ -585,7 +585,11 @@ export async function main({
         throw error;
       }
     }
-    diagnosticsDirectory = join(releasePath(store, plan.id), 'logs');
+    // Prerequisite diagnostics have no release journal. Keep them outside the
+    // history namespace so a doctor call cannot create an unverifiable release.
+    diagnosticsDirectory = operation === 'doctor'
+      ? join(store, 'diagnostics', plan.id, 'logs')
+      : join(releasePath(store, plan.id), 'logs');
     const adapters = platformAdapters ?? {};
     if (operation === 'doctor') {
       if (values.ref)
