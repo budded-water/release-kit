@@ -646,7 +646,7 @@ export async function main({
       repo,
       store,
       config,
-      command,
+      command: operation === 'attach' ? executeCommand : command,
       adapters,
       project,
       environment,

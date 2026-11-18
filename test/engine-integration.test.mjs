@@ -1375,41 +1375,86 @@ test('cancelling the lifecycle signal alone stops attachment commit and transpor
   });
 });
 
-test('successful source verification after the parent returns does not append attachment evidence', async t => {
+test('after the parent returns attachment starts no further source command, journal append or PATCH', async t => {
+  for (const step of ['ls-remote', 'status']) await t.test(step, async t => {
+    const f = await attachFixture(t, { managed: true });
+    const lifecycle = await enableResourceLifecycle(f, 'checks');
+    const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic deferred source verification' });
+    const events = join(releasePath(f.store, f.plan.id), 'events');
+    const before = (await readdir(events)).sort();
+    const checked = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    const command = f.options.command;
+    const commands = [];
+    f.options.command = async (binary, args, options) => {
+      commands.push(args[0]);
+      const result = await command(binary, args, options);
+      if (binary === 'git' && args[0] === step && (step !== 'status' || options.cwd.endsWith('/build-ios'))) {
+        checked.resolve();
+        await resume.promise;
+      }
+      return result;
+    };
+    let attachment;
+    let commandCount;
+    try {
+      await assert.rejects(lifecycle.run({ plan: f.plan, operation: 'execute', lease,
+        execute: async resourceSession => {
+          const runner = createRunner({ ...f.options, resourceSession });
+          attachment = runner.attachBuild(f.plan, { versionId: 'manual-draft' });
+          await Promise.race([checked.promise, attachment]);
+          commandCount = commands.length;
+          return { state: 'uploaded' };
+        },
+      }), { code: 'RESOURCE_OWNERSHIP', cleanupIncomplete: true });
+    } finally {
+      resume.resolve();
+      await assert.rejects(attachment, { code: 'RESOURCE_ADMISSION' });
+    }
+    assert.equal(commands.length, commandCount);
+    assert.equal(lease.retained, true);
+    assert.deepEqual(Object.values((await readResourceLedger(f.store)).state.tasks).map(task => task.state), ['active']);
+    assert.deepEqual((await readdir(events)).sort(), before);
+    assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+  });
+});
+
+test('managed attachment keeps confirmation but rejects success when its parent returns during lock cleanup', async t => {
   const f = await attachFixture(t, { managed: true });
   const lifecycle = await enableResourceLifecycle(f, 'checks');
-  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic deferred source verification' });
-  const events = join(releasePath(f.store, f.plan.id), 'events');
-  const before = (await readdir(events)).sort();
-  const checked = Promise.withResolvers();
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic attach teardown' });
+  const releasing = Promise.withResolvers();
   const resume = Promise.withResolvers();
-  const command = f.options.command;
-  f.options.command = async (binary, args, options) => {
-    const result = await command(binary, args, options);
-    if (binary === 'git' && args[0] === 'status' && options.cwd.endsWith('/build-ios')) {
-      checked.resolve();
+  const target = digest({ appId: 'example.synthetic', platform: 'ios', destination: 'app-store' });
+  const path = join(f.store, 'locks', `target-${target}.lock`);
+  const unlink = fs.unlink;
+  const mocked = t.mock.method(fs, 'unlink', async file => {
+    if (file === path) {
+      releasing.resolve();
       await resume.promise;
     }
-    return result;
-  };
+    return unlink(file);
+  });
+  syncBuiltinESMExports();
   let attachment;
   try {
     await assert.rejects(lifecycle.run({ plan: f.plan, operation: 'execute', lease,
       execute: async resourceSession => {
         const runner = createRunner({ ...f.options, resourceSession });
         attachment = runner.attachBuild(f.plan, { versionId: 'manual-draft' });
-        await Promise.race([checked.promise, attachment]);
+        await Promise.race([releasing.promise, attachment]);
         return { state: 'uploaded' };
       },
     }), { code: 'RESOURCE_OWNERSHIP', cleanupIncomplete: true });
+    assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'attached');
+    assert.equal(lease.retained, true);
   } finally {
     resume.resolve();
-    await assert.rejects(attachment, { code: 'RESOURCE_ADMISSION' });
+    try { await assert.rejects(attachment, { code: 'RESOURCE_ADMISSION' }); }
+    finally { mocked.mock.restore(); syncBuiltinESMExports(); }
   }
-  assert.equal(lease.retained, true);
-  assert.deepEqual(Object.values((await readResourceLedger(f.store)).state.tasks).map(task => task.state), ['active']);
-  assert.deepEqual((await readdir(events)).sort(), before);
-  assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'attached');
+  assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
 });
 
 test('attachment preserves the existing confirmed unsubmitted-upload handoff boundary', async t => {

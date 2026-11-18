@@ -72,7 +72,7 @@ export function createRunner({
   repo,
   store,
   config,
-  command = runCommand,
+  command: executeCommand = runCommand,
   adapters,
   project,
   environment = process.env,
@@ -83,8 +83,8 @@ export function createRunner({
 }) {
   const resourceContext = new AsyncLocalStorage();
   let resourceMaintenance = null;
-  const cleanup = createCleanupGuard(store, command);
-  command = cleanup.command;
+  const cleanup = createCleanupGuard(store, executeCommand);
+  const command = cleanup.command;
   const acquireLock = async (path) => {
     await cleanup.assertSafe();
     const unlock = await acquireStateLock(path);
@@ -155,12 +155,13 @@ export function createRunner({
       throw error;
     }
   }
-  async function verifyProductionSource(state, directory, platform, root, operation, { persist = true } = {}) {
+  async function verifyProductionSource(state, directory, platform, root, operation,
+    { persist = true, sourceCommand = command } = {}) {
     await cleanup.assertSafe();
     if (!['ios', 'android'].includes(platform)) return;
     let verification;
     try {
-      verification = await assertProductionSource({ repo, root, plan: state.plan, command });
+      verification = await assertProductionSource({ repo, root, plan: state.plan, command: sourceCommand });
     } catch (error) {
       error.releaseSourceRejected = true;
       throw error;
@@ -877,11 +878,17 @@ export function createRunner({
         const assertAttachmentCurrent = session?.assertCurrent;
         const assertAttachmentAdmission = () =>
           assertResourceAdmission({ store, plan, session, operation: 'attach' });
+        const sourceCommand = (binary, args, options) => cleanup.run(() => {
+          signal?.throwIfAborted();
+          assertAttachmentCurrent?.();
+          return executeCommand(binary, args, { ...options, signal, diagnostics: false });
+        });
         const report = await attachStoreBuild({
           ...ctx,
           assertAttachmentAdmission,
           assertAttachmentCurrent,
-          assertPublicationSource: () => verifyProductionSource(state, directory, 'ios', root, 'publication', { persist: false }),
+          assertPublicationSource: () => verifyProductionSource(state, directory, 'ios', root, 'publication',
+            { persist: false, sourceCommand }),
           checkpoint: async (name, evidence, { signal: intentSignal } = {}) => {
             await assertAttachmentAdmission();
             await ctx.checkpoint(name, evidence, () => {
@@ -895,8 +902,12 @@ export function createRunner({
         await unlock();
       }
     };
-    const execute = session => resourceContext.run(session, () =>
-      admittedRelease(plan, task, { existingOnly: true, operation: 'attach' }));
+    const execute = async session => {
+      const report = await resourceContext.run(session, () =>
+        admittedRelease(plan, task, { existingOnly: true, operation: 'attach' }));
+      session?.assertCurrent?.();
+      return report;
+    };
     if (resourceSession?.admitAttach) return resourceSession.admitAttach(execute);
     if (resourceSession?.runAttachment) return resourceSession.runAttachment(execute);
     if (resourceSession) return execute(resourceSession);
