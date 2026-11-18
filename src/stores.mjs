@@ -1488,6 +1488,7 @@ export async function attachStoreBuild(ctx, { versionId } = {}) {
   if (!validBuild(freshBuild)) throw new StoreError('The uploaded build is no longer eligible for attachment.');
   if (await readBeforeWrite()) return finish(false);
   await save(ctx, 'ios-attach', { state: 'intent', versionId, buildId });
+  await ctx.assertAttachmentAdmission?.();
   try {
     await request(ctx, relationship, token, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },

@@ -116,4 +116,5 @@ upload-only iOS release to an explicit existing manual draft before review.
 - **WHEN** the installed local entry requests attachment from an activated state root using its active activity lease
 - **THEN** the runner verifies the installed policy and settled lifecycle state before admitting the exact saved release for attachment
 - **AND** the command preserves the activity lease and resource journal without scheduling reclamation, building or using other execution capabilities
-- **AND** interrupted ownership or a changed policy blocks attachment checkpoints, preserving any recorded intent for reconciliation under a new lease
+- **AND** interrupted ownership or a changed policy blocks attachment checkpoints and dispatch, preserving any recorded intent for reconciliation under a new lease
+- **AND** an unsettled source command keeps activity ownership for reconciliation

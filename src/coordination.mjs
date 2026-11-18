@@ -193,7 +193,13 @@ async function writeOwner(path, owner) {
 }
 
 async function assertOwnerRecord(path, owner, expectedStat) {
-  const current = await readOwner(path, owner.kind);
+  let current;
+  try {
+    current = await readOwner(path, owner.kind);
+  } catch (error) {
+    if (error.code === 'ENOENT') throw invalid(`Coordination ownership record is missing: ${path}`);
+    throw error;
+  }
   if (
     !sameFile(current.stat, expectedStat) ||
     !OWNER_KEYS.every((key) => current.owner[key] === owner[key])
@@ -298,24 +304,40 @@ async function acquire(anchor, kind, { operation } = {}) {
   });
   let released = false;
   let retained = false;
+  let borrowers = 0;
+  async function assertOwnership({ expectedOwner = owner, expectedAnchor = anchor } = {}) {
+    if (expectedAnchor !== anchor) throw invalid('Coordination lease belongs to a different anchor');
+    await underGate(anchor, identity, async () => {
+      if (released || retained || owner !== expectedOwner)
+        throw invalid('Coordination lease is no longer current');
+      await inventory(anchor);
+      await assertOwnerRecord(path, owner, stat);
+    });
+  }
+  const assertUnborrowed = () => {
+    if (borrowers) throw invalid('Coordination lease is borrowed by an active operation');
+  };
   return {
     get owner() { return owner; },
     get retained() { return retained; },
     retain() { retained = true; },
-    async assertOwnership({ expectedOwner = owner, expectedAnchor = anchor } = {}) {
-      if (expectedAnchor !== anchor) throw invalid('Coordination lease belongs to a different anchor');
-      await underGate(anchor, identity, async () => {
-        if (released || retained || owner !== expectedOwner)
-          throw invalid('Coordination lease is no longer current');
-        await inventory(anchor);
-        await assertOwnerRecord(path, owner, stat);
-      });
+    assertOwnership,
+    async withOwnership(options, execute) {
+      borrowers++;
+      try {
+        await assertOwnership(options);
+        return await execute();
+      } finally {
+        borrowers--;
+      }
     },
     async transition(nextKind) {
+      assertUnborrowed();
       if (released || retained || !['maintenance', 'activity'].includes(nextKind))
         throw invalid('Cannot transition a released lease or unknown ownership kind');
       if (owner.kind === nextKind) return;
       await underGate(anchor, identity, async () => {
+        assertUnborrowed();
         const current = await inventory(anchor);
         const owners = [...current.activities, ...(current.maintenance ? [current.maintenance] : [])];
         const own = owners.find(entry => entry.token === owner.token);
@@ -326,6 +348,7 @@ async function acquire(anchor, kind, { operation } = {}) {
         const nextPath = join(anchor, nextKind === 'maintenance' ? MAINTENANCE : `activity-${owner.token}.json`);
         // The admission gate hides the handoff. A crash between these durable
         // operations leaves conflicting evidence and blocks every new admission.
+        assertUnborrowed();
         await writeOwner(nextPath, next);
         const nextStat = await lstat(nextPath);
         await removeOwned(path, owner, stat);
@@ -338,9 +361,12 @@ async function acquire(anchor, kind, { operation } = {}) {
       if (released) return;
       if (retained) throw Object.assign(invalid('Coordination ownership retained for explicit recovery'),
         { cleanupIncomplete: true });
+      assertUnborrowed();
       await underGate(anchor, identity, async () => {
         if (released) return;
+        assertUnborrowed();
         await anchorIdentity(anchor, identity);
+        assertUnborrowed();
         await removeOwned(path, owner, stat);
         released = true;
       });

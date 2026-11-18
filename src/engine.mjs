@@ -874,10 +874,13 @@ export function createRunner({
         const root = checkoutDirectory(state, directory, 'ios');
         const ctx = context(state, directory, 'ios', root);
         const session = resourceContext.getStore();
+        const assertAttachmentAdmission = () =>
+          assertResourceAdmission({ store, plan, session, operation: 'attach' });
         const report = await attachStoreBuild({
           ...ctx,
+          assertAttachmentAdmission,
           checkpoint: async (name, evidence) => {
-            await assertResourceAdmission({ store, plan, session, operation: 'attach' });
+            await assertAttachmentAdmission();
             await ctx.checkpoint(name, evidence);
           },
         }, { versionId });

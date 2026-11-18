@@ -338,7 +338,7 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
   async function assertAttachActivity(lease, owner) {
     signal?.throwIfAborted();
     if (owner?.kind !== 'activity' || typeof lease?.assertOwnership !== 'function' ||
-        lease.retained || lease.owner !== owner)
+        typeof lease.withOwnership !== 'function' || lease.retained || lease.owner !== owner)
       throw resourceError('RESOURCE_ADMISSION', 'Managed attachment requires a current activity lease from the attach-aware coordinator');
     await feature();
     await lease.assertOwnership({ expectedOwner: owner, expectedAnchor: anchor });
@@ -353,13 +353,18 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
         await assertAttachActivity(lease, owner);
       },
     });
-    sessions.add(admitted);
-    try {
-      await admitted.assertActive();
-      return await execute(admitted);
-    } finally {
-      sessions.delete(admitted);
-    }
+    return lease.withOwnership({ expectedOwner: owner, expectedAnchor: anchor }, async () => {
+      sessions.add(admitted);
+      try {
+        await admitted.assertActive();
+        return await execute(admitted);
+      } catch (error) {
+        if (!parent && error.cleanupIncomplete) lease.retain();
+        throw error;
+      } finally {
+        sessions.delete(admitted);
+      }
+    });
   }
 
   async function admitAttach({ plan, lease, execute } = {}) {

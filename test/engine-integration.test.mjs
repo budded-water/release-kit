@@ -790,6 +790,14 @@ test('attach honors both locks and only uses an existing managed admission', asy
   assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
 });
 
+async function displaceActivityRecord(f, lifecycle, lease, { replace = false } = {}) {
+  const owner = join(lifecycle.coordinationAnchor, 'activity-' + lease.owner.token + '.json');
+  const saved = join(f.base, 'original-owner.json');
+  await rename(owner, saved);
+  if (replace) await writeFile(owner, await readFile(saved), { mode: 0o600 });
+  return () => rename(saved, owner);
+}
+
 test('managed attach borrows its installed activity without starting a resource task', async t => {
   const f = await attachFixture(t, { managed: true });
   const lifecycle = await enableResourceLifecycle(f, 'checks');
@@ -826,6 +834,10 @@ test('managed attach borrows its installed activity without starting a resource 
     assert.deepEqual(f.requests, []);
 
     f.options.resourceLease = lease;
+    f.remote.onFreshBuild = async () => {
+      await assert.rejects(lease.transition('maintenance'), /borrowed by an active operation/);
+      await assert.rejects(lease.release(), /borrowed by an active operation/);
+    };
     const attached = await f.invoke();
     assert.equal(attached.exit, 0);
     assert.equal(attached.report.state, 'attached');
@@ -841,7 +853,7 @@ test('managed attach borrows its installed activity without starting a resource 
 });
 
 test('managed attach refuses intent if activity or activation changes during provider reads', async t => {
-  for (const [variant, code] of [['released', 'COORDINATION_INVALID'], ['transitioned', 'RESOURCE_ADMISSION'],
+  for (const [variant, code] of [['owner-missing', 'COORDINATION_INVALID'],
       ['owner-replaced', 'COORDINATION_INVALID'], ['marker-missing', 'RESOURCE_ADMISSION'],
       ['marker-changed', 'RESOURCE_COMPATIBILITY']]) {
     await t.test(variant, async t => {
@@ -851,20 +863,10 @@ test('managed attach refuses intent if activity or activation changes during pro
       f.options.resourceLifecycle = lifecycle;
       f.options.resourceLease = lease;
       const marker = join(f.store, 'resources', 'feature.json');
-      const ownerPath = join(lifecycle.coordinationAnchor, 'activity-' + lease.owner.token + '.json');
-      const originalOwnerPath = join(f.base, 'original-owner.json');
-      let replacedOwner = false;
+      let restoreOwner;
       f.remote.onFreshBuild = async () => {
-        if (variant === 'released') await lease.release();
-        if (variant === 'transitioned') {
-          await lease.transition('maintenance');
-          await lease.transition('activity');
-        }
-        if (variant === 'owner-replaced') {
-          await rename(ownerPath, originalOwnerPath);
-          replacedOwner = true;
-          await writeFile(ownerPath, await readFile(originalOwnerPath), { mode: 0o600 });
-        }
+        if (variant.startsWith('owner-'))
+          restoreOwner = await displaceActivityRecord(f, lifecycle, lease, { replace: variant === 'owner-replaced' });
         if (variant === 'marker-missing') await rm(marker);
         if (variant === 'marker-changed') {
           const saved = JSON.parse(await readFile(marker, 'utf8'));
@@ -876,7 +878,7 @@ test('managed attach refuses intent if activity or activation changes during pro
         assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
         assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
       } finally {
-        if (replacedOwner) await rename(originalOwnerPath, ownerPath);
+        await restoreOwner?.();
         await lease.release();
       }
     });
@@ -909,17 +911,17 @@ test('managed attach refuses unsettled lifecycle history before provider access'
 });
 
 test('managed attach derives the same continuous guard from an existing heavy session', async t => {
-  for (const [variant, code] of [['transitioned', 'RESOURCE_ADMISSION'], ['marker-changed', 'RESOURCE_COMPATIBILITY']]) {
+  for (const [variant, code] of [['owner-replaced', 'COORDINATION_INVALID'], ['marker-changed', 'RESOURCE_COMPATIBILITY']]) {
     await t.test(variant, async t => {
       const f = await attachFixture(t, { managed: true });
       const lifecycle = await enableResourceLifecycle(f, 'checks');
       const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic managed parent' });
       const marker = join(f.store, 'resources', 'feature.json');
       const markerBytes = await readFile(marker);
+      let restoreOwner;
       f.remote.onFreshBuild = async () => {
-        if (variant === 'transitioned') {
-          await lease.transition('maintenance');
-          await lease.transition('activity');
+        if (variant === 'owner-replaced') {
+          restoreOwner = await displaceActivityRecord(f, lifecycle, lease, { replace: true });
         } else {
           await writeFile(marker, JSON.stringify({ ...JSON.parse(markerBytes), policy: 'f'.repeat(64) }));
         }
@@ -932,6 +934,7 @@ test('managed attach derives the same continuous guard from an existing heavy se
             assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
             assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
           } finally {
+            await restoreOwner?.();
             if (variant === 'marker-changed') await writeFile(marker, markerBytes);
           }
         } });
@@ -948,15 +951,17 @@ test('managed attach keeps intent when its activity ends after the write and rec
   const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic interrupted write' });
   f.options.resourceLifecycle = lifecycle;
   f.options.resourceLease = lease;
+  let restoreOwner;
   f.remote.onPatch = async () => {
     f.remote.selected = 'apple-build';
-    await lease.release();
+    restoreOwner = await displaceActivityRecord(f, lifecycle, lease);
     return new Response(null, { status: 204 });
   };
   try {
     await assert.rejects(f.invoke(), { code: 'COORDINATION_INVALID' });
     assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'intent');
   } finally {
+    await restoreOwner?.();
     await lease.release();
   }
 
@@ -971,6 +976,60 @@ test('managed attach keeps intent when its activity ends after the write and rec
   } finally {
     await recovery.release();
   }
+});
+
+test('managed attach checks ownership again after saving intent and before PATCH dispatch', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic pre-dispatch loss' });
+  f.options.resourceLifecycle = lifecycle;
+  f.options.resourceLease = lease;
+  const check = lease.assertOwnership;
+  let restoreOwner;
+  lease.assertOwnership = async options => {
+    if (!restoreOwner && (await f.state()).checkpoints.ios['ios-attach']?.state === 'intent' &&
+        f.requests.every(request => request.method === 'GET'))
+      restoreOwner = await displaceActivityRecord(f, lifecycle, lease);
+    return check(options);
+  };
+  try {
+    await assert.rejects(f.invoke(), { code: 'COORDINATION_INVALID' });
+    assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'intent');
+    assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+  } finally {
+    await restoreOwner?.();
+    await lease.release();
+  }
+  const recovery = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic read-only reconciliation' });
+  try {
+    f.options.resourceLease = recovery;
+    const result = await f.invoke();
+    assert.equal(result.exit, 2);
+    assert.equal(result.report.writeAttempted, false);
+    assert.ok(f.requests.every(request => request.method === 'GET'));
+  } finally {
+    await recovery.release();
+  }
+});
+
+test('managed attach retains activity when source-command cleanup is uncertain', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic uncertain source cleanup' });
+  f.options.resourceLifecycle = lifecycle;
+  f.options.resourceLease = lease;
+  const command = f.options.command;
+  f.options.command = async (binary, args, options) => {
+    if (binary === 'git' && args[0] === 'ls-remote') throw cleanupError();
+    return command(binary, args, options);
+  };
+  await assert.rejects(f.invoke(), { cleanupIncomplete: true });
+  assert.equal(lease.retained, true);
+  await assertCoordinationOwner(lifecycle.coordinationAnchor, lease.owner, 'activity');
+  await assert.rejects(acquireMaintenance(lifecycle.coordinationAnchor, { operation: 'synthetic maintenance' }),
+    { code: 'COORDINATION_BUSY' });
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+  assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
 });
 
 test('attachment preserves the existing confirmed unsubmitted-upload handoff boundary', async t => {
