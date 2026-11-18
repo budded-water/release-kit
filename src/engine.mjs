@@ -155,7 +155,7 @@ export function createRunner({
       throw error;
     }
   }
-  async function verifyProductionSource(state, directory, platform, root, operation) {
+  async function verifyProductionSource(state, directory, platform, root, operation, { persist = true } = {}) {
     await cleanup.assertSafe();
     if (!['ios', 'android'].includes(platform)) return;
     let verification;
@@ -167,7 +167,7 @@ export function createRunner({
     }
     state.sourceVerifications ??= {};
     state.sourceVerifications[platform] = { ...verification, operation };
-    await saveState(directory, state);
+    if (persist) await saveState(directory, state);
   }
   const context = (state, directory, platform, root) => ({
     root,
@@ -881,9 +881,13 @@ export function createRunner({
           ...ctx,
           assertAttachmentAdmission,
           assertAttachmentCurrent,
-          checkpoint: async (name, evidence) => {
+          assertPublicationSource: () => verifyProductionSource(state, directory, 'ios', root, 'publication', { persist: false }),
+          checkpoint: async (name, evidence, { signal: intentSignal } = {}) => {
             await assertAttachmentAdmission();
-            await ctx.checkpoint(name, evidence, assertAttachmentCurrent);
+            await ctx.checkpoint(name, evidence, () => {
+              intentSignal?.throwIfAborted();
+              assertAttachmentCurrent?.();
+            });
           },
         }, { versionId });
         return { operation: 'attach', releaseId: plan.id, ...report };

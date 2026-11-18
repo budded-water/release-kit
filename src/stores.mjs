@@ -138,7 +138,7 @@ function ownedPlayRelease(ctx) {
   return previous(ctx, 'android-upload') || previous(ctx, 'android-commit');
 }
 
-async function save(ctx, name, value) {
+async function save(ctx, name, value, checkpointOptions) {
   // Confirmed results may still be journaled during cancellation. Never start a
   // new operation intent after the operator has stopped the release.
   if (value.state === 'intent') {
@@ -147,7 +147,7 @@ async function save(ctx, name, value) {
     ctx.signal?.throwIfAborted();
   }
   const data = { ...value, identity: identity(ctx), recordedAt: now() };
-  await ctx.checkpoint(name, data);
+  await ctx.checkpoint(name, data, checkpointOptions);
   ctx.previous ??= {};
   ctx.previous[name] = data;
   return data;
@@ -1489,7 +1489,7 @@ export async function attachStoreBuild(ctx, { versionId } = {}) {
   const freshBuild = (await request(ctx, `${APPLE}/v1/builds/${segment(buildId)}`, token))?.data;
   if (!validBuild(freshBuild)) throw new StoreError('The uploaded build is no longer eligible for attachment.');
   if (await readBeforeWrite()) return finish(false);
-  await save(ctx, 'ios-attach', { state: 'intent', versionId, buildId });
+  await save(ctx, 'ios-attach', { state: 'intent', versionId, buildId }, { signal: ctx.signal });
   await ctx.assertAttachmentAdmission?.();
   let dispatched = false;
   try {

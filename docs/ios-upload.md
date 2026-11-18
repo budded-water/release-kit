@@ -76,12 +76,13 @@ replace a different selected build.
 
 The first write requires the existing production source gate and, when configured,
 prepared Apple content verification. Before a write, version inventory, the
-draft snapshot and the relationship read must agree. The runner rechecks the build and current source before saving
-`ios-attach` intent and making one Apple build relationship PATCH.
+draft snapshot and the relationship read must agree. The runner rechecks the
+build and current source, records the source proof and `ios-attach` intent in the
+same event, then makes one Apple build relationship PATCH.
 Exit `0` means a separate read confirmed the exact attachment, including when the
 same build was already selected. Exit `2` means the operation was refused or the
 attachment cannot be confirmed. Cancellation through the CLI returns `130` and
-keeps any saved intent. `writeAttempted` describes whether that invocation sent a
+keeps any intent already committed. `writeAttempted` describes whether that invocation sent a
 write attempt, while the provider read establishes the selected build. Use
 `store-status` or `store-preflight` for a fresh read after attachment.
 
