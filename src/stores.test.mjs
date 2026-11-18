@@ -1169,6 +1169,20 @@ test('an iOS draft without a selected build still permits submission of the jour
   assert.equal(f.commands[0].args[0], 'deliver');
 });
 
+test('iOS publication refuses if a confirmed attach-only relationship was removed', async t => {
+  const f = await fixture(t, 'ios');
+  f.checkpoint('ios-upload', { state: 'uploaded', buildId: 'build-42' });
+  f.checkpoint('ios-attach', { state: 'attached', versionId: 'version-2', buildId: 'build-42' });
+  const version = appVersion('PREPARE_FOR_SUBMISSION');
+  version.relationships.build.data = null;
+  appleProvider(f, { versions: [version] });
+
+  await assert.rejects(publishStore(f.ctx), /confirmed iOS attachment changed/);
+  assert.equal(f.commands.length, 0);
+  assert.equal(f.calls.some(call => call.opts.method), false);
+  assert.deepEqual(f.journal, []);
+});
+
 test('ambiguous exact iOS versions never choose the first version for publication', async (t) => {
   const f = await fixture(t, 'ios');
   f.checkpoint('ios-upload', { state: 'uploaded', buildId: build.id });

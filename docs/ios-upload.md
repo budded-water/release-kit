@@ -54,6 +54,60 @@ resume this contract correctly: keep a reviewed upload-aware core and explicit
 adapter together. Read-only historical access is not execution compatibility.
 Project hooks are trusted executable policy, not sandboxed code.
 
+## Attach the confirmed build to a manual draft
+
+Get the draft ID from `store-status --version <version>` using the private Apple
+query config. Then use the original release config and state store for the write:
+
+```sh
+release-kit --project ./release.project.mjs attach <release-id> \
+  --config /absolute/private/release.json --state-dir /absolute/private/state \
+  --version-id <apple-draft-id>
+```
+
+`attach` uses an existing single-platform iOS upload-only journal. The task must
+still own the App Store target and have a matching built artifact, passing native
+acceptance and `ios-upload` checkpoint with the exact Apple build ID. If upload
+processing was still pending, use the bounded upload resume to observe the build
+before attaching it. The operator-supplied draft ID must match the visible version
+and any recorded prepared draft. The build must be `VALID` and unexpired. This
+operation supports manual drafts in `PREPARE_FOR_SUBMISSION` and refuses to
+replace a different selected build.
+
+The first write requires the existing production source gate and, when configured,
+prepared Apple content verification. After rechecking the build and relationship,
+the runner saves `ios-attach` intent and makes one Apple build relationship PATCH.
+Exit `0` means a separate read confirmed the exact attachment, including when the
+same build was already selected. Exit `2` means the operation was refused or the
+attachment cannot be confirmed. Cancellation through the CLI returns `130` and
+keeps any saved intent. `writeAttempted` describes whether that invocation sent a
+write attempt, while the provider read establishes the selected build. Use
+`store-status` or `store-preflight` for a fresh read after attachment.
+
+Rerun `attach` with the same release and draft to reconcile an unknown result.
+A missing relationship cannot authorize another PATCH after intent. The journal
+preserves the upload receipt and original approval scope. Plain resume continues
+its prior upload-only behavior. Explicit full publication requires a confirmed attachment if this operation was
+attempted. The built-in iOS publisher also checks that the recorded build is
+still selected. `attach` itself changes only the build linkage. It does not
+schedule work, run Fastlane, upload, change release settings or submit for review.
+
+The runner method is `runner.attachBuild(plan, { versionId })`. It uses the same
+release and target locks and existing state admission. It does not initiate
+resource lifecycle execution or reclamation. An activated state root still needs
+the live admission required by that root. A managed consumer must integrate the
+command with its existing admission rules before adoption.
+
+`ios-attach` is an additive checkpoint in the existing schema 1 journal. Upload
+journals without that checkpoint can attach when their exact confirmed upload
+is recorded. Older cores can read the history, but do not enforce the attachment
+fence, so use an attach-aware core for further publication from these journals.
+The standalone `release-kit-store` query launcher remains read-only. Separate
+state stores or external clients can still race between the final Apple read and
+write. The relationship API exposes no conditional update for that interval.
+
+[Apple build relationship API](https://developer.apple.com/documentation/appstoreconnectapi/patch-v1-appstoreversions-_id_-relationships-build)
+
 ## Continuing a confirmed draft after source advances
 
 A new current descendant may retain the same prepared iOS draft only before the

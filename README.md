@@ -126,6 +126,9 @@ not store availability. `pending-review`, `pending-release`, `prepared`, absent
 results and unknown adapter states return nonzero.
 Adapters must use these explicit outcomes. Polling uses the same classification
 but succeeds only when all selected platforms have verified availability.
+The separate iOS `attach` command uses the journaled build and an explicit
+App Store draft ID for build selection. See [bounded attachment](docs/ios-upload.md#attach-the-confirmed-build-to-a-manual-draft).
+
 
 ## Standalone store reads and preflight
 

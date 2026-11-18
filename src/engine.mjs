@@ -19,6 +19,7 @@ import {
   acceptanceConfig,
 } from './plan.mjs';
 import { prepareStoreContent, verifyAppleDraftContinuity } from './store-content.mjs';
+import { attachStoreBuild } from './stores.mjs';
 import { requireProject } from './project.mjs';
 import { createCleanupGuard } from './cleanup.mjs';
 import { runCommand } from './command.mjs';
@@ -666,7 +667,7 @@ export function createRunner({
       }
     }
   }
-  async function publicationOwnership(state, directory, platform) {
+  async function publicationOwnership(state, directory, platform, { existingOnly = false } = {}) {
     const appId = state.artifacts[platform]?.appId ?? state.plan.appIds[platform];
     const key = digest({ appId, platform, destination: state.plan.destinations[platform] });
     const ownerPath = join(store, 'targets', `${key}.json`);
@@ -677,6 +678,12 @@ export function createRunner({
         owner = await readJson(ownerPath);
       } catch (error) {
         if (error.code !== 'ENOENT') throw error;
+      }
+      if (existingOnly) {
+        if (owner?.id !== state.plan.id || owner.source !== state.plan.source || owner.appId !== appId ||
+            owner.platform !== platform || owner.destination !== state.plan.destinations[platform])
+          throw new Error('Existing publication target ownership is required for attachment');
+        return unlock;
       }
       if (owner && owner.id !== state.plan.id) {
         if (state.stages[`publish-${platform}`] || state.stages[`upload-${platform}`])
@@ -735,7 +742,7 @@ export function createRunner({
   }
   async function withRelease(plan, task, operation = 'execute') {
     if (resourceSession) return resourceContext.run(resourceSession, () => admittedRelease(plan, task));
-    if (!resourceLifecycle) return admittedRelease(plan, task);
+    if (!resourceLifecycle || operation === null) return admittedRelease(plan, task);
     const completed = await resourceLifecycle.run({ plan, operation, lease: resourceLease,
       execute: session => resourceContext.run(session, () => admittedRelease(plan, task)) });
     resourceMaintenance = completed.maintenance;
@@ -820,6 +827,31 @@ export function createRunner({
       }
     }, 'content');
   }
+  async function attachBuild(plan, { versionId } = {}) {
+    if (plan.platforms.length !== 1 || plan.platforms[0] !== 'ios' || plan.destinations?.ios !== 'app-store')
+      throw new Error('Attach requires one existing iOS App Store release');
+    if (digest(config) !== plan.configDigest)
+      throw new Error('Attach requires the original release configuration');
+    return withRelease(plan, async (state, directory) => {
+      const artifact = state.artifacts.ios;
+      const accepted = state.acceptance.ios;
+      if (state.stages['build-ios']?.status !== 'succeeded' || !artifact ||
+          state.acceptanceStatus?.ios?.state !== 'passed' || accepted?.passed !== true ||
+          accepted.source !== plan.source || accepted.platform !== 'ios' || accepted.artifactSha256 !== artifact.sha256)
+        throw new Error('Attach requires the existing built artifact and passing, matching native acceptance');
+      if (state.uploadRequested !== true || state.publicationRequested !== false ||
+          state.stages['publish-ios'] || state.supersededBy?.ios)
+        throw new Error('Attach requires an upload-only release before publication, with no supersession');
+      const unlock = await publicationOwnership(state, directory, 'ios', { existingOnly: true });
+      try {
+        const root = checkoutDirectory(state, directory, 'ios');
+        const report = await attachStoreBuild(context(state, directory, 'ios', root), { versionId });
+        return { operation: 'attach', releaseId: plan.id, ...report };
+      } finally {
+        await unlock();
+      }
+    }, null);
+  }
   async function validate(plan, { ui = false } = {}) {
     if (typeof ui !== 'boolean') throw new Error('UI validation selection must be boolean');
     return withRelease(plan, async (state, directory) => {
@@ -834,6 +866,9 @@ export function createRunner({
     if (typeof uploadOnly !== 'boolean' || (uploadOnly && (publish || retryBuild)))
       throw new Error('Upload-only execution cannot grant publication or retry a build');
     return withRelease(plan, async (state, directory) => {
+      const attachment = state.checkpoints.ios?.['ios-attach'];
+      if ((publish || state.publicationRequested) && attachment && attachment.state !== 'attached')
+        throw new Error('Reconcile the pending iOS attachment before publication');
       if (state.uploadRequested !== undefined && typeof state.uploadRequested !== 'boolean')
         throw new Error('Invalid saved upload intent');
       if (uploadOnly && (state.publicationRequested || state.checkpoints.ios?.['ios-review'] ||
@@ -1251,6 +1286,6 @@ export function createRunner({
       await unlock();
     }
   }
-  return { execute, validate, status, observe, prepareContent,
+  return { execute, validate, status, observe, prepareContent, attachBuild,
     get resourceMaintenance() { return resourceMaintenance; } };
 }
