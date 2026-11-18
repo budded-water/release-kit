@@ -284,8 +284,10 @@ test('standalone multi-provider CLI uses explicit config without Expo or state a
   const f = await fixture(t), config = join(f.root, 'stores.json');
   await writeFile(config, JSON.stringify({ schemaVersion: 1, stores: { android: f.play.store, harmony: f.harmony.store } }));
   t.mock.method(globalThis, 'fetch', f.play.fetch);
+  const maintenance = new Proxy({}, { get() { throw new Error('Store reads must not acquire or reclaim task resources'); } });
   const run = async args => {
     let report; const exit = await main({ repo: '/missing-project', args: [...args, '--config', config],
+      resourceLifecycle: maintenance, resourceLease: maintenance, resourceSession: maintenance,
       environment: { ...f.play.environment, ...f.harmony.environment }, output: s => report = JSON.parse(s) });
     return { exit, report };
   };

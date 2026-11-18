@@ -66,7 +66,9 @@ formal/test mappings and incomplete metadata. Verify pure replay performs no I/O
 Run full repository checks, packed npm/pnpm consumers, hosted CI and independent
 current-head review. Keep real acceptance distinct from synthetic success. This
 change does not adopt a new runtime in any installed controller or alter lifecycle
-resource registration; read-only commands require neither mechanism.
+resource registration; read-only commands require neither mechanism. The shared
+CLI must dispatch these reads without acquiring lifecycle sessions/leases or
+invoking reclamation, even when maintenance hooks were supplied by its caller.
 
 Official contracts:
 - https://developers.google.com/android-publisher/api-ref/rest/v3/applications.tracks.releases/list

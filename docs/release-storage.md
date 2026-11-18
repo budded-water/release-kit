@@ -1,10 +1,10 @@
 # Release storage inventory and cleanup preview
 
-Task lifecycle reclamation is a separate, unimplemented
-[OpenSpec proposal](../openspec/changes/add-task-resource-lifecycle/proposal.md).
-Its [design and flow](../openspec/changes/add-task-resource-lifecycle/design.md)
-describe future admission/settlement hooks, ownership, cache invalidation and rollout.
-The commands documented below remain read-only; this proposal enables no cleanup.
+Task lifecycle execution is a separate capability; see
+[registered task resources](resource-lifecycle.md) for its explicit activation,
+admission/settlement hooks and remaining rollout gates. Its
+[OpenSpec design and flow](../openspec/changes/add-task-resource-lifecycle/design.md)
+remain separate from installed acceptance. The commands below remain read-only.
 
 These standalone commands inspect an existing **state root**, not a whole home,
 installation, runner or toolchain directory. They require no project module,
@@ -112,11 +112,11 @@ Every entry still requires exclusive maintenance and a fresh scan, clean source/
 project-policy verification, retained external evidence and signing inputs, and
 explicit invalidation of reconstructable installation/check stages. Removing
 workspaces without invalidating their successful stages can break reuse; the
-current feature neither removes them nor changes those stages. Build/publication
+read-only commands neither remove them nor change those stages. Build/publication
 intents must not be invalidated into a duplicate side effect.
 
 Saved/replayed JSON is not authenticated evidence. `applySupported` and
-`deletionAuthorized` are false. There is no retention timer, cache deletion,
+`deletionAuthorized` are false. These commands provide no retention timer, cache deletion,
 artifact deduplication, journal compaction or installed-controller upgrade.
 [The implemented storage specification](../openspec/specs/release-storage/spec.md)
 owns the observation and preview contracts. Synthetic consumers establish behavior

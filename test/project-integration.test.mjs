@@ -6,18 +6,21 @@ import {
   writeFile,
   readFile,
   readdir,
+  realpath,
   rm,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createPlan } from "../src/plan.mjs";
 import { createRunner } from "../src/engine.mjs";
 import { runCommand } from "../src/command.mjs";
 import { digest, loadState, releasePath, saveState } from "../src/state.mjs";
 import { main } from "../src/cli.mjs";
+import { createResourceLifecycle } from "../src/resource-lifecycle.mjs";
+import { acquireMaintenance } from "../src/coordination.mjs";
 
 async function fixture(t, name) {
-  const directory = await mkdtemp(join(tmpdir(), `release-kit-${name}-`));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), `release-kit-${name}-`)));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const repo = join(directory, "repo");
   await mkdir(repo);
@@ -113,6 +116,56 @@ test("two synthetic consumers select their own checks without changing core or s
     assert.deepEqual(f.calls, ["install", "check"]);
     assert.deepEqual(second.artifacts, {});
     assert.deepEqual(second.outcomes, {});
+  }
+});
+
+test('two lifecycle consumers rebuild independent generations and refuse protected cache overage', async t => {
+  for (const name of ['alpha', 'beta']) {
+    const f = await fixture(t, `lifecycle-${name}`);
+    const anchor = join(dirname(f.repo), 'coordination');
+    await mkdir(anchor, { mode: 0o700 });
+    await mkdir(f.store, { mode: 0o700 });
+    const path = `.ui-eval/compiler-${name}`;
+    const toolchain = digest({ syntheticToolchain: name });
+    const lifecycle = createResourceLifecycle({ stateDirectory: f.store,
+      policy: { schemaVersion: 1, coordinationAnchor: anchor, cacheBudgetBytes: 8,
+        minimumFreeBytes: 1, phaseBytes: { validate: 1, execute: 1, content: 1 } },
+      adapter: { schemaVersion: 1, policy: digest({ consumer: name }),
+        caches: { compiler: { path, stages: ['checks'] } }, references: async () => [],
+        toolchain: async () => toolchain,
+        reconstructable: async ({ resource }) => ({
+          source: (await runCommand('git', ['rev-parse', 'HEAD'], { cwd: join(f.store, 'releases', f.plan.id, 'validation') })).stdout.trim(),
+          sourceClean: !(await runCommand('git', ['status', '--porcelain'], { cwd: f.repo })).stdout.trim(),
+          toolchain: resource.toolchain, inputsAvailable: true, recoveryIndependent: true,
+        }) } });
+    const lease = await acquireMaintenance(anchor, { operation: 'synthetic consumer activation' });
+    await lifecycle.activate({ lease });
+    await lease.release();
+    let protect = false;
+    const check = f.project.checkSource;
+    f.project.checkSource = async ctx => {
+      const cache = await ctx.resources.prepareCache('compiler', ctx.root);
+      await writeFile(join(cache, 'object.o'), '0123456789abcdef');
+      if (protect) {
+        const other = { ...f.plan, id: `release-${'f'.repeat(24)}` };
+        await saveState(releasePath(f.store, other.id), { schemaVersion: 1, plan: other,
+          stages: {}, requiredInput: join(cache, 'object.o') });
+      }
+      return check(ctx);
+    };
+    for (let generation = 0; generation < 2; generation++) {
+      const runner = createRunner({ ...f, resourceLifecycle: lifecycle });
+      await runner.validate(f.plan);
+      assert.equal(runner.resourceMaintenance.resources[0].disposition, 'reclaimed');
+    }
+    assert.deepEqual(f.calls, ['install', 'check', 'check']);
+    protect = true;
+    const runner = createRunner({ ...f, resourceLifecycle: lifecycle });
+    await runner.validate(f.plan);
+    assert.equal(runner.resourceMaintenance.outcome, 'protected-capacity');
+    await assert.rejects(createRunner({ ...f, resourceLifecycle: lifecycle }).validate(f.plan), { code: 'RESOURCE_CAPACITY' });
+    assert.deepEqual(f.calls, ['install', 'check', 'check', 'check']);
+    assert.equal(await readFile(join(releasePath(f.store, f.plan.id), 'validation', path, 'object.o'), 'utf8'), '0123456789abcdef');
   }
 });
 

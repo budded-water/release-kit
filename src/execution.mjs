@@ -119,7 +119,7 @@ export function executionHandlers({
       )
         throw new Error('Dispatch resume does not match the existing release journal');
     },
-    async execute(request) {
+    async execute(request, resourceSession) {
       if (request.operation === 'executor-check')
         return {
           exitCode: 0,
@@ -171,6 +171,7 @@ export function executionHandlers({
         command,
         platformAdapters,
         project,
+        resourceSession,
         signal,
         environment,
         output(value) {

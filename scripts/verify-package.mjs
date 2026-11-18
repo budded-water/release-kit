@@ -80,6 +80,13 @@ try {
     assert.match(preflightHelp,/GET-only iOS/);
     import { saveState, releasePath } from '@budded-water/release-kit/state';
     import { inspectStorage, planStorageCleanup } from '@budded-water/release-kit/storage';
+    import { createResourceLifecycle } from '@budded-water/release-kit/resource-lifecycle';
+    import { resourceLifecycleContract } from '@budded-water/release-kit/cli';
+    assert.equal(typeof createResourceLifecycle, 'function');
+    assert.equal(resourceLifecycleContract, 'task-resource-lifecycle/v1');
+    let resourceHelp;
+    assert.equal(await main({args:['storage-reclaim','--help'],output:s=>resourceHelp=s}),0);
+    assert.match(resourceHelp,/prior installed activation/);
     assert.equal(typeof inspectStorage, 'function'); assert.equal(typeof planStorageCleanup, 'function');
     import { createRunner } from '@budded-water/release-kit/engine';
     import { storeHandoff, inspectPrivacyAssociation } from '@budded-water/release-kit/operator-store';

@@ -1,8 +1,11 @@
 # Design: task resource lifecycle
 
 ## 1. Status and existing contracts
-Status: proposal only. No current command gains deletion behavior through these
-documents. The accepted [storage specification](../../specs/release-storage/spec.md)
+Status: core and App consumer source implemented; installed acceptance and the
+remaining verification gates stay open in [tasks](tasks.md). Documentation alone
+activates nothing. Consumer-owned documentation defines its declared leaves,
+dedicated sessions and stable bootstrap adoption; these are not core defaults.
+The accepted [storage specification](../../specs/release-storage/spec.md)
 and [storage reader guide](../../../docs/release-storage.md) describe bounded,
 non-atomic observations and non-executable previews. Their conservative historical
 reference rules remain intact. `cleanup.mjs` guards subprocess settlement and locks;
@@ -71,9 +74,10 @@ trusted configuration/adapter; dry-run performs no writes or session termination
 and produces no reusable deletion authorization. Mutation obtains maintenance and
 reassesses the live root; it never accepts a saved plan or arbitrary deletion paths.
 Resource status is exposed through the same bounded report, with separate task and
-maintenance results. The exact exit-code mapping must be frozen in implementation
-before consumer integration: success, protected/insufficient capacity, incomplete
-observation and cancellation must remain machine-distinguishable.
+maintenance results. The implemented CLI mapping is defined in the
+[resource guide](../../../docs/resource-lifecycle.md#commands-and-activation): success,
+protected/insufficient capacity, incomplete observation and cancellation remain
+machine-distinguishable.
 
 Lifecycle is disabled when configuration is absent. Activation requires a reviewed
 adapter/policy and bootstrap supporting this contract. Enabled policy supplies:
@@ -103,8 +107,9 @@ native allocation; storage pressure does not trigger or authorize provider write
 
 ## 6. Ledger and compatibility
 Use one private resource ledger under the existing state root, outside all cache
-targets: `resources/events/` with ordered append-only events and an atomically
-replaceable derived index. The ledger is subordinate local resource bookkeeping,
+targets: `resources/events/` with ordered append-only deltas and an in-memory derived
+index. Deltas avoid recopying unrelated task/resource identities into each event.
+The ledger is subordinate local resource bookkeeping,
 not a second release/publication ledger. Rebuild the index from verified events;
 corruption, unsupported schemas or divergent identities block mutation.
 

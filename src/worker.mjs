@@ -2,6 +2,7 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { main as localMain } from './cli.mjs';
+export { resourceLifecycleContract } from './cli.mjs';
 import { runCommand } from './command.mjs';
 import { loadExecutorPolicy, runRequest } from './executor.mjs';
 import { createCleanupGuard } from './cleanup.mjs';
@@ -21,6 +22,8 @@ export async function workerMain({
   platformAdapters,
   project,
   signal,
+  resourceLifecycle,
+  resourceLease,
   output = console.log,
 } = {}) {
   if (signal?.aborted) return 130;
@@ -62,6 +65,8 @@ export async function workerMain({
       worker,
       command: executeCommand,
       signal: abort.signal,
+      resourceLifecycle,
+      resourceLease,
       ...executionHandlers({
         policy,
         command: executeCommand,

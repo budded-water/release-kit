@@ -230,5 +230,20 @@ Official sources: [Play summaries](https://developers.google.com/android-publish
 [Harmony state meanings](https://developer.huawei.com/consumer/cn/doc/App/agc-help-publish-api-data-appinfo-0000002236041454/).
 
 Synthetic auth/HTTP/CLI and packed-consumer checks establish implementation behavior,
-not live account access. Real Play/Harmony acceptance and installed consumer
-adoption remain pending; the active OpenSpec change retains those boundaries.
+not live account access. Separate authorized operational acceptance has verified one
+Google Play production track through inventory, exact status and preflight using
+existing gcloud impersonation, plus exact CN Harmony formal and available test
+versions through status and preflight. Pure assessment replay matched without extra
+requests. This is one app/account per provider, not other tracks, complete history,
+reviewer login, device installation or publication readiness. Private identities
+and evidence remain outside the repository. Installed query-client adoption remains
+a separate gate; managed release controllers are not upgraded by these reads.
+
+Harmony version-list discovery is not implemented by this CLI. The official
+[version-list API](https://developer.huawei.com/consumer/cn/doc/app/agc-help-publish-api-query-brief-info-list-0000002236201254/)
+is a read-only POST and was used separately to discover the exact test version ID
+for operational acceptance. Its existence does not make `store-versions` support
+Harmony or change the GET-only transport of the implemented Harmony query.
+
+Store-read dispatch remains independent of task-resource lifecycle admission,
+leases and reclamation; the shared CLI does not activate those hooks for reads.

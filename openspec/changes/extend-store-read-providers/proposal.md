@@ -15,7 +15,7 @@ release journal, while retaining each provider's identity and coverage limits.
 - Query one exact Harmony versionId for formal or test release; interpret state
   using releaseType. Do not advertise a complete Harmony inventory API.
 - Expose provider-specific query APIs and a pure, scoped preflight assessment.
-  Unsupported facts remain unknown and publicReleaseReady remains false.
+  Unsupported checks remain explicit and publicReleaseReady remains false.
 - Reuse existing authorized authentication and sanitized AGC projection; enforce
   bounded reads, shared cancellation/deadlines and no mutation/journal boundary.
 
@@ -29,5 +29,7 @@ and consumer distribution holds remain unchanged.
 Synthetic HTTP/auth/CLI tests must cover exact identity, provider state mappings,
 ambiguous/absent/incomplete observations, malformed and unknown states, redaction,
 request boundaries, cancellation, deadlines and Apple compatibility. Real account
-acceptance needs separately supplied authorized private inputs; until performed,
-the change remains active and live acceptance must be reported as pending.
+acceptance needs separately supplied authorized private inputs and must remain
+pending until performed. Record completed coverage and its limits in the task
+checklist and query documentation; source delivery and standalone client adoption
+remain separate gates, with no publication readiness inferred.

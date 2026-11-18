@@ -1,4 +1,5 @@
 import { storageMain } from './storage-cli.mjs';
+import { loadResourceLifecycle, resourceReclaimMain } from './resource-cli.mjs';
 import { storeReadMain } from './store-read-cli.mjs';
 import { fileURLToPath } from 'node:url';
 import { resolve, join } from 'node:path';
@@ -26,10 +27,12 @@ import { createCleanupGuard } from './cleanup.mjs';
 import { wechatMain } from './wechat-cli.mjs';
 
 const defaultRoot = process.cwd();
+export const resourceLifecycleContract = 'task-resource-lifecycle/v1';
 const help = `Release CLI (one designated Mac and state store)
 
 storage-inspect --state-dir <existing-directory>
 storage-plan --state-dir <existing-directory>
+storage-reclaim --config <private-lifecycle-policy.json> [--dry-run]
 doctor --config <private.json> [--platforms ios,android,harmony] [--publish]
 store-versions --config <private.json>
 store-status --config <private.json> --version <candidate> [--build-id <expected-apple-build>]
@@ -56,6 +59,7 @@ dispatch-status <request-id> --executor-config <private-policy.json>
 dispatch-resume <request-id> --executor-config <private-policy.json>
 
 Options: --state-dir <absolute-directory>, --executor local|auto|github,
+         --lifecycle-config <private-operational-policy.json> (heavy tasks only),
          --summary (status/dispatch-status only; progress, not acceptance evidence),
          --executor-config <private-policy.json> (or RELEASE_KIT_EXECUTOR_CONFIG)
          --acceptance <platform=receipt.json> (repeatable)
@@ -94,10 +98,15 @@ export async function main({
   githubExecutor,
   dispatchBinding,
   signal,
+  resourceLifecycle,
+  resourceLease,
+  resourceSession,
   environment = process.env,
   output = console.log,
 } = {}) {
   if (signal?.aborted) return 130;
+  if (args[0] === 'storage-reclaim') return resourceReclaimMain({ args, repo, project,
+    command: executeCommand, signal, resourceLease, environment, output });
   if (['storage-inspect', 'storage-plan'].includes(args[0])) return storageMain({ args, signal, output });
   if (['store-versions', 'store-status', 'store-preflight'].includes(args[0])) return storeReadMain({ args, environment, signal, output, command: executeCommand });
   if (args[0] === 'wechat') return wechatMain({ args: args.slice(1), repo, project: wechatProject, command: executeCommand, signal, output });
@@ -127,6 +136,7 @@ export async function main({
       release: { type: 'string', multiple: true },
       request: { type: 'string', multiple: true },
       'timeout-seconds': { type: 'string' },
+      'lifecycle-config': { type: 'string' },
     },
   });
   if (values.help || !positionals.length) {
@@ -134,6 +144,8 @@ export async function main({
     return 0;
   }
   const operation = positionals[0];
+  if (values['lifecycle-config'] && !['validate', 'run', 'resume', 'upload', 'store-plan', 'store-apply', 'dispatch-resume'].includes(operation))
+    throw new Error('--lifecycle-config is only valid for task execution');
   let waitMs;
   let pollIntervalMs;
   if (values.wait !== undefined || values['poll-interval'] !== undefined) {
@@ -314,6 +326,11 @@ export async function main({
   if (signal?.aborted) return 130;
   const configPath = values.config ?? policy?.releaseConfig;
   const store = resolve(values['state-dir'] ?? policy?.stateDirectory ?? join(repo, '.release'));
+  if (values['lifecycle-config']) {
+    if (resourceLifecycle) throw new Error('Lifecycle policy is already bound by the managed entry');
+    resourceLifecycle = await loadResourceLifecycle(values['lifecycle-config'],
+      { repo, store, project, command: executeCommand, signal, environment });
+  }
   if (policy) assertExecutionPaths(policy, { repo, configPath, store });
   if (operatorOperation) {
     const result =
@@ -522,6 +539,8 @@ export async function main({
         executor: 'local',
         command,
         signal: abort.signal,
+        resourceLifecycle,
+        resourceLease,
         ...handlers,
       });
       output(JSON.stringify(status, null, 2));
@@ -569,7 +588,11 @@ export async function main({
         throw error;
       }
     }
-    diagnosticsDirectory = join(releasePath(store, plan.id), 'logs');
+    // Prerequisite diagnostics have no release journal. Keep them outside the
+    // history namespace so a doctor call cannot create an unverifiable release.
+    diagnosticsDirectory = operation === 'doctor'
+      ? join(store, 'diagnostics', plan.id, 'logs')
+      : join(releasePath(store, plan.id), 'logs');
     const adapters = platformAdapters ?? {};
     if (operation === 'doctor') {
       if (values.ref)
@@ -614,6 +637,9 @@ export async function main({
       project,
       environment,
       signal: abort.signal,
+      resourceLifecycle,
+      resourceLease,
+      resourceSession,
     });
     if (contentOperation) {
       const report = await runner.prepareContent(plan, {
@@ -677,6 +703,8 @@ export async function main({
           github: githubExecutor ?? createGithubExecutor({ policy, command, environment }),
           command,
           signal: abort.signal,
+          resourceLifecycle,
+          resourceLease,
           ...handlers,
         });
         output(JSON.stringify(status, null, 2));
@@ -700,12 +728,13 @@ export async function main({
             publicationRequested: Boolean(state.publicationRequested),
             recordDirectory: releasePath(store, plan.id),
             diagnosticsDirectory,
+            ...(runner.resourceMaintenance ? { resourceMaintenance: runner.resourceMaintenance } : {}),
           },
           null,
           2,
         ),
       );
-      return interrupted ? 130 : 0;
+      return interrupted ? 130 : runner.resourceMaintenance?.ownershipRetained ? 4 : 0;
     }
     const state = await runner.execute(plan, {
       publish: values.publish,
@@ -726,12 +755,20 @@ export async function main({
           outcomes: state.outcomes,
           recordDirectory: releasePath(store, plan.id),
           diagnosticsDirectory,
+          ...(runner.resourceMaintenance ? { resourceMaintenance: runner.resourceMaintenance } : {}),
         },
         null,
         2,
       ),
     );
-    return interrupted ? 130 : releaseExitCode(state);
+    return interrupted ? 130 : releaseExitCode(state) || (runner.resourceMaintenance?.ownershipRetained ? 4 : 0);
+  } catch (error) {
+    if (error.resourceAdmissionFailed === true && error.resourceMaintenance) {
+      output(JSON.stringify({ operation, taskStarted: false, resourceMaintenance: error.resourceMaintenance }, null, 2));
+      return interrupted || abort.signal.aborted ? 130 :
+        error.resourceMaintenance.outcome === 'protected-capacity' ? 3 : 4;
+    }
+    throw error;
   } finally {
     signal?.removeEventListener('abort', stop);
     process.removeListener('SIGINT', stop);
