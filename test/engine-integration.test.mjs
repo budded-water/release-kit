@@ -2,7 +2,9 @@ import test from 'node:test';
 import { generateKeyPairSync, verify } from 'node:crypto';
 import { attachStoreBuild, statusStore, uploadStore } from '../src/stores.mjs';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import { mkdtemp, realpath, mkdir, writeFile, readFile, readdir, rename, rm } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRunner } from '../src/engine.mjs';
@@ -1251,6 +1253,59 @@ test('attachment checks local admission at fetch after the Apple token resolves'
   await assert.rejects(attachStoreBuild(ctx, { versionId: 'manual-draft' }), /attachment admission expired/);
   assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'intent');
   assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+});
+
+test('managed attachment cannot commit a staged checkpoint after its parent returns', async t => {
+  for (const checkpoint of ['intent', 'attached']) await t.test(checkpoint, async t => {
+    const f = await attachFixture(t, { managed: true });
+    const lifecycle = await enableResourceLifecycle(f, 'checks');
+    const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic staged attachment' });
+    const staged = Promise.withResolvers();
+    const publish = Promise.withResolvers();
+    const events = join(releasePath(f.store, f.plan.id), 'events');
+    const open = fs.open;
+    const mocked = t.mock.method(fs, 'open', async (file, ...args) => {
+      const handle = await open(file, ...args);
+      if (file.startsWith(events + '/') && file.endsWith('.tmp')) {
+        const sync = handle.sync.bind(handle);
+        handle.sync = async () => {
+          await sync();
+          const event = JSON.parse(await readFile(file, 'utf8'));
+          if (event.state.checkpoints.ios['ios-attach']?.state === checkpoint) {
+            staged.resolve();
+            await publish.promise;
+          }
+        };
+      }
+      return handle;
+    });
+    syncBuiltinESMExports();
+    let attachment;
+    try {
+      await assert.rejects(lifecycle.run({ plan: f.plan, operation: 'execute', lease,
+        execute: async resourceSession => {
+          const runner = createRunner({ ...f.options, resourceSession });
+          attachment = runner.attachBuild(f.plan, { versionId: 'manual-draft' });
+          await Promise.race([staged.promise, attachment]);
+          return { state: 'uploaded' };
+        },
+      }), { code: 'RESOURCE_OWNERSHIP', cleanupIncomplete: true });
+      assert.equal(lease.retained, true);
+      const tasks = Object.values((await readResourceLedger(f.store)).state.tasks);
+      assert.deepEqual(tasks.map(task => task.state), ['active']);
+    } finally {
+      publish.resolve();
+      try { await assert.rejects(attachment, { code: 'RESOURCE_ADMISSION' }); }
+      finally {
+        mocked.mock.restore();
+        syncBuiltinESMExports();
+      }
+    }
+    const saved = (await f.state()).checkpoints.ios['ios-attach'];
+    assert.equal(saved?.state, checkpoint === 'intent' ? undefined : 'intent');
+    assert.equal(f.requests.filter(request => request.method === 'PATCH').length, checkpoint === 'intent' ? 0 : 1);
+    assert.ok((await readdir(events)).every(file => !file.endsWith('.tmp')));
+  });
 });
 
 test('attachment preserves the existing confirmed unsubmitted-upload handoff boundary', async t => {

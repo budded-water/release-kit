@@ -51,7 +51,7 @@ export async function readJson(path) {
   if ((await lstat(path)).isSymbolicLink()) throw new Error(`Refusing redirected record: ${path}`);
   return JSON.parse(await readFile(path, 'utf8'));
 }
-export async function atomicJson(path, value, { exclusive = false } = {}) {
+export async function atomicJson(path, value, { exclusive = false, beforeCommit } = {}) {
   await privateDirectory(dirname(path));
   const temporary = `${path}.${randomUUID()}.tmp`;
   const file = await open(temporary, 'wx', 0o600);
@@ -62,6 +62,7 @@ export async function atomicJson(path, value, { exclusive = false } = {}) {
     await file.close();
   }
   try {
+    beforeCommit?.();
     if (exclusive) {
       await link(temporary, path);
       await unlink(temporary);
@@ -131,7 +132,7 @@ export async function loadState(directory) {
   }
   return state;
 }
-export async function saveState(directory, state) {
+export async function saveState(directory, state, { beforeCommit } = {}) {
   const events = join(directory, 'events');
   await privateDirectory(events);
   const names = (await readdir(events)).filter((name) => /^\d{8}\.json$/.test(name)).sort();
@@ -141,6 +142,6 @@ export async function saveState(directory, state) {
   await atomicJson(
     join(events, `${String(sequence).padStart(8, '0')}.json`),
     { sequence, previous, digest: digest(state), state },
-    { exclusive: true },
+    { exclusive: true, beforeCommit },
   );
 }

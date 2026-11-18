@@ -43,7 +43,8 @@ activated policy and settled resource journal must match the installed state
 root. The admission is scoped to the saved release, attachment command, and
 one continuous activity lease from the attach-aware coordinator. The runner
 rechecks the captured lease record and the active policy at attachment
-checkpoints and before sending the relationship update, including within an
+checkpoints and before sending the relationship update. It also checks local
+admission at journal commit and before the transport starts, including within an
 already admitted heavy task. The borrowed handle cannot release or transition
 while the attachment is active. Uncertain subprocess cleanup retains the lease.
 A heavy task also retains the lease and stays unsettled if it returns before its

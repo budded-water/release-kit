@@ -186,10 +186,10 @@ export function createRunner({
     assertPublicationSource: () =>
       verifyProductionSource(state, directory, platform, root, 'publication'),
     previous: (state.checkpoints[platform] ??= {}),
-    checkpoint: async (name, data) => {
+    checkpoint: async (name, data, beforeCommit) => {
       state.checkpoints[platform] ??= {};
       state.checkpoints[platform][name] = data;
-      await saveState(directory, state);
+      await saveState(directory, state, { beforeCommit });
     },
   });
   const outputDirectory = (state, directory, platform) =>
@@ -883,8 +883,7 @@ export function createRunner({
           assertAttachmentCurrent,
           checkpoint: async (name, evidence) => {
             await assertAttachmentAdmission();
-            assertAttachmentCurrent?.();
-            await ctx.checkpoint(name, evidence);
+            await ctx.checkpoint(name, evidence, assertAttachmentCurrent);
           },
         }, { versionId });
         return { operation: 'attach', releaseId: plan.id, ...report };

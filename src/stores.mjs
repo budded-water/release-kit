@@ -1469,6 +1469,7 @@ export async function attachStoreBuild(ctx, { versionId } = {}) {
   const finish = async (writeAttempted) => {
     ctx.signal?.throwIfAborted();
     if (prior?.state !== 'attached') await save(ctx, 'ios-attach', { state: 'attached', versionId, buildId });
+    ctx.assertAttachmentCurrent?.();
     return result(ctx, 'attached', { versionId, buildId, writeAttempted, releaseType: 'MANUAL' });
   };
   const unconfirmed = writeAttempted => result(ctx, 'unknown', { versionId, buildId, writeAttempted,
