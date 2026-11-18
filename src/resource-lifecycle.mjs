@@ -359,7 +359,7 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
         await admitted.assertActive();
         return await execute(admitted);
       } catch (error) {
-        if (!parent && error.cleanupIncomplete) lease.retain();
+        if (error.cleanupIncomplete) lease.retain();
         throw error;
       } finally {
         sessions.delete(admitted);
@@ -431,7 +431,8 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
         store, plan: Object.freeze({ id: plan.id, source: plan.source }), taskId,
         async assertActive() {
           signal?.throwIfAborted();
-          if (!sessions.has(session)) throw resourceError('RESOURCE_ADMISSION', 'Resource task admission has expired');
+          if (!sessions.has(session) || lease.retained)
+            throw resourceError('RESOURCE_ADMISSION', 'Resource task admission is no longer active');
           await assertCoordinationOwner(anchor, lease.owner, 'activity');
         },
         async admitAttach(execute) {
@@ -534,8 +535,15 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
       };
       Object.freeze(session);
       sessions.add(session);
+      const recordRetainedOwnership = () => {
+        if (!lease.retained) return;
+        safeToRelease = false;
+        primaryError ??= Object.assign(resourceError('RESOURCE_OWNERSHIP',
+          'Activity ownership is retained for explicit cleanup reconciliation'), { cleanupIncomplete: true });
+      };
       try { result = await execute(session); }
       catch (error) { primaryError = error; }
+      recordRetainedOwnership();
       if (signal?.aborted) primaryError ??= signal.reason;
       const executionSucceeded = !primaryError && result?.state !== 'unknown' &&
         (result?.exitCode === undefined || result.exitCode === 0) &&
@@ -560,6 +568,7 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
       } catch (error) { teardownError ??= error; safeToRelease = false; }
       clearTimeout(cleanupTimer);
       sessions.delete(session);
+      recordRetainedOwnership();
       if (primaryError?.cleanupIncomplete) safeToRelease = false;
       if (safeToRelease) {
         ledger.state.tasks[taskId].state = 'settled';

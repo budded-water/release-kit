@@ -1012,24 +1012,39 @@ test('managed attach checks ownership again after saving intent and before PATCH
   }
 });
 
-test('managed attach retains activity when source-command cleanup is uncertain', async t => {
-  const f = await attachFixture(t, { managed: true });
-  const lifecycle = await enableResourceLifecycle(f, 'checks');
-  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic uncertain source cleanup' });
-  f.options.resourceLifecycle = lifecycle;
-  f.options.resourceLease = lease;
-  const command = f.options.command;
-  f.options.command = async (binary, args, options) => {
-    if (binary === 'git' && args[0] === 'ls-remote') throw cleanupError();
-    return command(binary, args, options);
-  };
-  await assert.rejects(f.invoke(), { cleanupIncomplete: true });
-  assert.equal(lease.retained, true);
-  await assertCoordinationOwner(lifecycle.coordinationAnchor, lease.owner, 'activity');
-  await assert.rejects(acquireMaintenance(lifecycle.coordinationAnchor, { operation: 'synthetic maintenance' }),
-    { code: 'COORDINATION_BUSY' });
-  assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
-  assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+test('managed attach retains activity even when a heavy callback catches uncertain source cleanup', async t => {
+  for (const nested of [false, true]) await t.test(nested ? 'existing heavy task' : 'standalone', async t => {
+    const f = await attachFixture(t, { managed: true });
+    const lifecycle = await enableResourceLifecycle(f, 'checks');
+    const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic uncertain source cleanup' });
+    f.options.resourceLifecycle = lifecycle;
+    f.options.resourceLease = lease;
+    const command = f.options.command;
+    f.options.command = async (binary, args, options) => {
+      if (binary === 'git' && args[0] === 'ls-remote') throw cleanupError();
+      return command(binary, args, options);
+    };
+    if (nested) {
+      await assert.rejects(lifecycle.run({ plan: f.plan, operation: 'execute', lease,
+        execute: async resourceSession => {
+          const runner = createRunner({ ...f.options, resourceSession });
+          await assert.rejects(runner.attachBuild(f.plan, { versionId: 'manual-draft' }), { cleanupIncomplete: true });
+          return { state: 'uploaded' };
+        },
+        settle: async ({ error }) => assert.equal(error?.cleanupIncomplete, true),
+      }), { cleanupIncomplete: true });
+      const tasks = Object.values((await readResourceLedger(f.store)).state.tasks);
+      assert.deepEqual(tasks.map(task => task.state), ['active']);
+    } else {
+      await assert.rejects(f.invoke(), { cleanupIncomplete: true });
+    }
+    assert.equal(lease.retained, true);
+    await assertCoordinationOwner(lifecycle.coordinationAnchor, lease.owner, 'activity');
+    await assert.rejects(acquireMaintenance(lifecycle.coordinationAnchor, { operation: 'synthetic maintenance' }),
+      { code: 'COORDINATION_BUSY' });
+    assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+    assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+  });
 });
 
 test('attachment preserves the existing confirmed unsubmitted-upload handoff boundary', async t => {

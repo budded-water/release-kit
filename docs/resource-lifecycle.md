@@ -45,7 +45,8 @@ one continuous activity lease from the attach-aware coordinator. The runner
 rechecks the captured lease record and the active policy at attachment
 checkpoints and before sending the relationship update, including within an
 already admitted heavy task. The borrowed handle cannot release or transition
-while the callback is active. Uncertain subprocess cleanup retains the lease. It preserves the lease and resource journal
+while the callback is active. Uncertain subprocess cleanup retains the lease and leaves an enclosing task
+unsettled even if its callback handles the error. It preserves the lease and resource journal
 without opening a heavy lifecycle task. See [bounded attachment](ios-upload.md#attach-the-confirmed-build-to-a-manual-draft).
 
 ## Trusted adapter and resource boundaries
