@@ -61,7 +61,11 @@ try {
     const providers = await import('@budded-water/release-kit/provider-store-query');
     const providerPreflight = await import('@budded-water/release-kit/provider-store-preflight');
     assert.equal(typeof providers.listPlayReleases, 'function');
+    assert.equal(typeof providers.listHarmonyReleases, 'function');
     assert.equal(typeof providers.getHarmonyRelease, 'function');
+    let inventoryHelp;
+    assert.equal(await main({args:['store-versions','--provider','appgallery-connect','--help'],output:s=>inventoryHelp=s}),0);
+    assert.ok(inventoryHelp.includes('lists formal/test versions'));
     assert.equal(typeof providerPreflight.inspectProviderStore, 'function');
     assert.equal(typeof providerPreflight.assessProviderPreflight, 'function');
     const play = await providers.getPlayRelease({store:{packageName:'test.example'},track:'production',versionCode:'42',

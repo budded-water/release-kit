@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { generateKeyPairSync, verify } from 'node:crypto';
-import { getPlayRelease, listPlayReleases, getHarmonyRelease } from './provider-store-query.mjs';
+import { constants, generateKeyPairSync, verify } from 'node:crypto';
+import { getPlayRelease, listPlayReleases, listHarmonyReleases, getHarmonyRelease } from './provider-store-query.mjs';
 import { inspectProviderStore, assessProviderPreflight } from './provider-store-preflight.mjs';
 import { main } from './cli.mjs';
 
@@ -24,7 +24,7 @@ async function fixture(t) {
   await writeFile(google, JSON.stringify({ client_email: 'synthetic@example.iam.gserviceaccount.com', private_key: pem }), { mode: 0o600 });
   await writeFile(harmony, JSON.stringify({ key_id: 'key', sub_account: 'sub', private_key: pem }), { mode: 0o600 });
   const calls = [];
-  const f = { root, calls, releases: [row()], appInfo: { versionId: '99', versionNumber: '1.0', versionCode: 42, releaseState: 4,
+  const f = { root, calls, releases: [row()], appids: [{ value: '123' }], versionList: [], appInfo: { versionId: '99', versionNumber: '1.0', versionCode: 42, releaseState: 4,
     privacyPolicy: 'https://example.com/privacy', testUserName: privateValue, testUserPassword: privateValue,
     registeredIdNumber: privateValue, certificateURLs: privateValue }, languages: [{ lang: 'en-US', appName: privateValue, appDesc: privateValue }] };
   const fetch = async (url, init) => {
@@ -40,6 +40,16 @@ async function fixture(t) {
       assert.ok(verify('RSA-SHA256', Buffer.from(`${header}.${payload}`), keys.publicKey, Buffer.from(signature, 'base64url')));
       return Response.json({ access_token: 'synthetic-token' });
     }
+    if (u.href === 'https://connect-api.cloud.huawei.com/api/publish/v3/version/brief-info/list') {
+      assert.equal(init.method, 'POST');
+      assert.equal(init.headers.appId, '123');
+      assert.deepEqual(JSON.parse(init.body), { packageName: 'example.a' });
+      const [header, payload, signature] = init.headers.Authorization.slice(7).split('.');
+      assert.equal(JSON.parse(Buffer.from(header, 'base64url')).alg, 'PS256');
+      assert.ok(verify('sha256', Buffer.from(`${header}.${payload}`),
+        { key: keys.publicKey, padding: constants.RSA_PKCS1_PSS_PADDING, saltLength: 32 }, Buffer.from(signature, 'base64url')));
+      return Response.json({ ret: { code: 0, msg: privateValue }, versionList: f.versionList });
+    }
     assert.equal(init.method ?? 'GET', 'GET');
     if (u.origin === 'https://androidpublisher.googleapis.com') {
       assert.match(u.pathname, /^\/androidpublisher\/v3\/applications\/example\.[ab]\/tracks\/[^/]+\/releases$/);
@@ -47,7 +57,7 @@ async function fixture(t) {
       return Response.json({ releases: f.releases });
     }
     assert.equal(u.origin, 'https://connect-api.cloud.huawei.com');
-    if (u.pathname.endsWith('/appid-list')) return Response.json({ ret: { code: 0 }, appids: [{ value: '123' }] });
+    if (u.pathname.endsWith('/appid-list')) return Response.json({ ret: { code: 0 }, appids: f.appids });
     assert.equal(u.pathname, '/api/publish/v3/app-info');
     return Response.json({ ret: { code: 0 }, appInfo: f.appInfo, languages: f.languages, auditInfo: { auditOpinion: privateValue } });
   };
@@ -217,6 +227,93 @@ test('Play route/method budget refuses a session attempting edits, external orig
   }
 });
 
+test('Harmony inventory sends only the bound signed reads and projects formal/test selectors in provider order', async t => {
+  const f = await fixture(t);
+  f.versionList = [
+    { versionId: '900719925474099301', releaseType: 6, state: 0, auditInfo: privateValue,
+      packageList: [{ versionCode: 42, versionName: '1.0', packageId: privateValue }] },
+    { versionId: '88', releaseType: 1, state: 0 },
+    { versionId: '99', releaseType: 6, state: 999, packageList: [] },
+    { releaseType: 7, privateValue },
+  ];
+  const report = await listHarmonyReleases(f.harmony);
+  assert.equal(report.observationComplete, true);
+  assert.equal(report.readOnly, true);
+  assert.equal(report.excludedReleaseCount, 1);
+  assert.deepEqual(report.target, { provider: 'appgallery-connect', platform: 'HARMONY', appId: '123', bundleId: 'example.a', region: 'CN' });
+  assert.deepEqual(report.versions.map(v => [v.versionId, v.releaseType, v.rawState, v.publicationState]),
+    [['900719925474099301', 6, 0, 'testing'], ['88', 1, 0, 'published'], ['99', 6, 999, 'unknown']]);
+  assert.equal(report.versions[2].reviewState, 'unknown');
+  assert.deepEqual(report.versions[0].packages, [{ version: '1.0', versionCode: 42 }]);
+  assert.equal(report.versions[1].packages, undefined);
+  assert.deepEqual(report.versions[2].packages, []);
+  assert.equal(JSON.stringify(report).includes(privateValue), false);
+  assert.deepEqual(f.calls.map(c => c.init.method), ['GET', 'POST']);
+  assert.equal(f.calls[0].url, 'https://connect-api.cloud.huawei.com/api/publish/v2/appid-list?packageName=example.a&packageTypes=7');
+  assert.equal(f.calls[1].url, 'https://connect-api.cloud.huawei.com/api/publish/v3/version/brief-info/list');
+});
+
+test('Harmony inventory distinguishes valid empty scope from malformed or unavailable provider data', async t => {
+  const f = await fixture(t);
+  for (const list of [[], [{ releaseType: 7 }]]) {
+    f.versionList = list;
+    const result = await listHarmonyReleases(f.harmony);
+    assert.equal(result.observationComplete, true);
+    assert.deepEqual(result.versions, []);
+    assert.equal(result.excludedReleaseCount, list.length);
+  }
+  const valid = { versionId: '99', releaseType: 6, state: 0 };
+  for (const list of [undefined, null, {}, [null], [{ ...valid, releaseType: undefined }],
+    [{ ...valid, versionId: 99 }], [{ ...valid, state: undefined }], [valid, valid],
+    [valid, { ...valid, versionId: '100', packageList: [{ versionCode: privateValue }] }],
+    Array.from({ length: 1001 }, (_, i) => ({ ...valid, versionId: String(i + 1) }))]) {
+    f.versionList = list;
+    const result = await listHarmonyReleases(f.harmony);
+    assert.equal(result.observationComplete, false);
+    assert.deepEqual(result.versions, []);
+    assert.equal(result.excludedReleaseCount, null);
+    assert.deepEqual(result.errors, [{ code: 'AGC_RESPONSE', reason: 'read-unavailable' }]);
+  }
+  const denied = await listHarmonyReleases({ ...f.harmony, fetch: (url, init) => init.method === 'POST'
+    ? Promise.resolve(new Response(privateValue, { status: 403 })) : f.harmony.fetch(url, init) });
+  assert.equal(denied.observationComplete, false);
+  assert.equal(denied.errors[0].code, 'AGC_HTTP_403');
+  assert.equal(JSON.stringify(denied).includes(privateValue), false);
+  const oversized = await listHarmonyReleases({ ...f.harmony, fetch: (url, init) => init.method === 'POST'
+    ? Promise.resolve(new Response(new Uint8Array(4 * 1024 * 1024 + 1))) : f.harmony.fetch(url, init) });
+  assert.equal(oversized.observationComplete, false);
+  assert.equal(oversized.errors[0].code, 'AGC_RESPONSE');
+  f.calls.length = 0;
+  f.appids = [{ value: '321' }];
+  const mismatch = await listHarmonyReleases(f.harmony);
+  assert.equal(mismatch.errors[0].code, 'AGC_IDENTITY');
+  assert.equal(f.calls.length, 1);
+});
+
+test('Harmony inventory rejects a late list response and propagates caller cancellation', async t => {
+  let requestDeadline;
+  t.mock.method(AbortSignal, 'timeout', () => {
+    requestDeadline = new AbortController();
+    return requestDeadline.signal;
+  });
+  const f = await fixture(t);
+  const late = await listHarmonyReleases({ ...f.harmony, fetch: async (url, init) => {
+    const response = await f.harmony.fetch(url, init);
+    if (init.method === 'POST') requestDeadline.abort();
+    return response;
+  } });
+  assert.equal(late.observationComplete, false);
+  assert.equal(late.errors[0].code, 'AGC_TRANSPORT');
+  assert.equal(f.calls.length, 2);
+  const controller = new AbortController();
+  await assert.rejects(listHarmonyReleases({ ...f.harmony, signal: controller.signal, fetch: async (url, init) => {
+    const response = await f.harmony.fetch(url, init);
+    if (init.method === 'POST') controller.abort();
+    return response;
+  } }), { name: 'AbortError' });
+  assert.equal(f.calls.length, 4);
+});
+
 test('Harmony exact formal/test HTTP reads retain type-specific semantics and redact sensitive fields', async t => {
   const f = await fixture(t), before = await readdir(f.root);
   const expected = { 1: { 0: ['approved', 'published'], 3: ['approved', 'pending-release'], 5: ['in-review', 'unknown'], 8: ['rejected', 'unknown'] },
@@ -336,22 +433,37 @@ test('standalone multi-provider CLI uses explicit config without Expo or state a
   f.releases = [row('NOT_APPROVED')];
   const status = await run(['store-status', '--provider', 'google-play', '--track', 'production', '--version-code', '42']);
   assert.equal(status.exit, 0); assert.equal(status.report.release.reviewState, 'rejected');
-  const preflight = await run(['store-preflight', '--provider', 'appgallery-connect', '--release-type', '6', '--version-id', '99']);
+  f.versionList = [{ versionId: '99', releaseType: 6, state: 4 }];
+  const listing = await run(['store-versions', '--provider', 'appgallery-connect']);
+  assert.equal(listing.exit, 0);
+  const [candidate] = listing.report.versions;
+  const selectors = ['--release-type', String(candidate.releaseType), '--version-id', candidate.versionId];
+  const harmonyStatus = await run(['store-status', '--provider', 'appgallery-connect', ...selectors]);
+  assert.equal(harmonyStatus.exit, 0);
+  assert.equal(harmonyStatus.report.release.versionId, candidate.versionId);
+  const preflight = await run(['store-preflight', '--provider', 'appgallery-connect', ...selectors]);
+  f.versionList = undefined;
+  const unavailable = await run(['store-versions', '--provider', 'appgallery-connect']);
+  assert.equal(unavailable.exit, 2);
+  assert.deepEqual(unavailable.report.versions, []);
   assert.equal(preflight.exit, 0); assert.equal(preflight.report.publicReleaseReady, false);
   assert.equal(preflight.report.target.releaseType, 6);
   assert.deepEqual((await readdir(f.root)).sort(), ['google.json', 'harmony.json', 'stores.json']);
 });
 
-test('incompatible CLI selectors and unsupported Harmony inventory fail before config/auth/HTTP', async () => {
+test('incompatible CLI selectors fail before config/auth/HTTP', async () => {
   const configs = ['--config', '/absent'];
   for (const args of [
-    ['store-versions', '--provider', 'appgallery-connect'],
+    ['store-versions', '--provider', 'appgallery-connect', '--version-id', '99'],
+    ['store-versions', '--provider', 'appgallery-connect', '--release-type', '6'],
+    ['store-versions', '--provider', 'appgallery-connect', '--track', 'production'],
     ['store-status', '--provider', 'google-play', '--track', 'production', '--version-code', '42', '--version', '1.0'],
     ['store-status', '--provider', 'google-play', '--version-code', '42'],
     ['store-status', '--provider', 'appgallery-connect', '--release-type', '6'],
     ['store-status', '--provider', 'appgallery-connect', '--release-type', '3', '--version-id', '99'],
     ['store-status', '--provider', 'app-store-connect', '--version', '1.0', '--track', 'production'],
-  ]) await assert.rejects(main({ args: [...args, ...configs], output: () => {} }));
+  ]) await assert.rejects(main({ args: [...args, ...configs], output: () => {} }),
+    error => error.code !== 'ENOENT');
 });
 
 test('invalid API identities, selectors and deadlines fail before acquiring credentials', async () => {

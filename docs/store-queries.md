@@ -141,6 +141,7 @@ still protect local invocation; saved journals retain operation identity.
 release-kit store-versions --provider google-play --config /absolute/private/store.json --track production
 release-kit store-status --provider google-play --config /absolute/private/store.json --track production --version-code 42
 release-kit store-preflight --provider google-play --config /absolute/private/store.json --track internal --version-code 42
+release-kit store-versions --provider appgallery-connect --config /absolute/private/store.json
 release-kit store-status --provider appgallery-connect --config /absolute/private/store.json --release-type 1 --version-id 123456789
 release-kit store-preflight --provider appgallery-connect --config /absolute/private/store.json --release-type 6 --version-id 123456789
 ```
@@ -151,8 +152,10 @@ status/preflight also require a decimal `--version-code` in Android's supported
 range. Named tracks use bounded letters/digits, dots, hyphens, underscores or
 colons (including form-factor prefixes). Harmony status/preflight require an exact
 numeric `--version-id` and `--release-type 1` (formal) or `6` (test). A configured
-Harmony versionId must agree with the selector. Selectors from another provider,
-Harmony `store-versions`, release IDs, state/publish/dispatch options are refused.
+Harmony versionId must agree with the detail selector. Harmony `store-versions`
+accepts no version selectors and queries the app independently of the optional
+config `versionId` and `language`, which apply to detail reads. Cross-provider
+selectors, release IDs and state/publish/dispatch options are refused.
 There is no fallback to another track or version.
 
 Private Play configuration reuses `stores.android.packageName` and either
@@ -167,13 +170,14 @@ the runner creates no release/task/diagnostic files and does not provision keys.
 The Node APIs retain provider-specific identities:
 
 ```js
-import { listPlayReleases, getPlayRelease, getHarmonyRelease }
+import { listPlayReleases, getPlayRelease, listHarmonyReleases, getHarmonyRelease }
   from '@budded-water/release-kit/provider-store-query';
 import { inspectProviderStore, assessProviderPreflight }
   from '@budded-water/release-kit/provider-store-preflight';
 
 const report = await getPlayRelease({ store: privateConfig.stores.android,
   track: 'production', versionCode: '42', environment: process.env });
+const versions = await listHarmonyReleases({ store: privateConfig.stores.harmony });
 const harmony = await getHarmonyRelease({ store: privateConfig.stores.harmony,
   releaseType: 6, versionId: '123456789', environment: process.env });
 const preflight = await inspectProviderStore({ provider: 'google-play',
@@ -187,16 +191,20 @@ command and provider reads. Late responses cannot produce a completed report.
 Play bodies are bounded to 4 MiB, with at most four requests for one operation;
 only exact OAuth/configured-IAM authentication POSTs and the selected package/track
 GET are allowed, with no edit creation, redirects or automatic retries. Harmony
-reuses bounded package lookup and app-info GETs and PS256 Service Account signing.
-Its combined per-request signal is checked after headers and during/after body
-consumption; a request-only timeout cannot advance lookup or become a successful
-observation while the overall deadline is still open.
+uses PS256 Service Account signing and a package lookup GET to bind the app. The
+second request is the existing app-info GET for detail or the official read-only
+version-list POST for inventory. The list sends the verified `appId` header and
+`packageName` body to the exact CN endpoint. Both operations permit at most two
+requests with a 60-second deadline and 4 MiB body limit per request, no redirects
+and no retries. The combined per-request signal is checked after headers and
+during/after body consumption. A request timeout cannot advance a timed-out lookup
+or produce a successful observation before the overall deadline expires.
 
 Reports retain exact targets, observation times, coverage, sanitized errors and
 `observationComplete`. Play coverage is `selected-track-nonobsolete-max20`; an
 unmatched code is `not-observed`, not global absence. Multiple matching releases
 are `ambiguous`; inaccessible or malformed responses are `unavailable`. Release
-names are omitted. Harmony coverage is `exact-selected-version`; mismatched app or
+names are omitted. Harmony detail coverage is `exact-selected-version`. A mismatched app or
 version identity is unavailable, never another-version selection. Missing state
 is incomplete; future states retain raw values and unknown interpretation.
 
@@ -244,11 +252,18 @@ formal/test targets, plus the existing Apple inventories in two projects. The pr
 client is retained for rollback. This adoption does not upgrade App release
 controllers, activate lifecycle policy or perform store writes.
 
-Harmony version-list discovery is not implemented by this CLI. The official
-[version-list API](https://developer.huawei.com/consumer/cn/doc/app/agc-help-publish-api-query-brief-info-list-0000002236201254/)
-is a read-only POST and was used separately to discover the exact test version ID
-for operational acceptance. Its existence does not make `store-versions` support
-Harmony or change the GET-only transport of the implemented Harmony query.
+Harmony inventory coverage is `cn-harmony-returned-formal-test-versions`. It
+preserves provider order and exposes each supported `releaseType`/`versionId` pair
+as exact detail selectors. IDs remain strings. Entries include raw and interpreted
+lifecycle and, when supplied, package version names/codes. Other release types are
+counted under `excludedReleaseCount`. The query accepts at most 1,000 returned
+records and 1,000 package summaries per supported record. Empty inventory is a
+successful scoped observation. Malformed, duplicate or over-limit supported
+records make the inventory unavailable (CLI exit 2) without partial rows. Use
+`observationComplete` and `errors` to distinguish that result from a valid empty
+list. This coverage does not imply full history, device availability or the most
+recent release. Scoped live acceptance verified the list and exact follow-up
+for returned formal and test IDs on one authorized CN app. [Harmony version-list contract](https://developer.huawei.com/consumer/cn/doc/app/agc-help-publish-api-query-brief-info-list-0000002236201254/).
 
 Harmony preflight requires the documented localization array to be present and
 well formed. An omitted/non-array collection is an incomplete read with sanitized

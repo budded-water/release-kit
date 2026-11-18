@@ -38,8 +38,8 @@ store-versions --config <private.json>
 store-status --config <private.json> --version <candidate> [--build-id <expected-apple-build>]
 store-preflight --config <private.json> --version <candidate> [--build-id <expected-apple-build>]
   Store reads default to Apple; explicit --provider google-play uses --track and
-  --version-code (status/preflight), appgallery-connect uses --release-type and
-  --version-id (status/preflight only). See each command's --help.
+  --version-code (status/preflight). Harmony lists formal/test versions and uses
+  --release-type and --version-id for status/preflight. See each command's --help.
 provider-inspect --config <private.json> [--platforms ios,android,harmony]
 store-plan --config <private.json> --ref <commit> --platforms ios|android
 store-apply <release-id> --config <private.json> --approve <content-plan-digest>

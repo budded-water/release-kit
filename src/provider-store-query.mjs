@@ -1,5 +1,5 @@
 import { playReadSession } from './stores.mjs';
-import { inspectAgc } from './agc.mjs';
+import { inspectAgc, listAgcReleases } from './agc.mjs';
 import { runCommand } from './command.mjs';
 
 const need = (condition, message) => { if (!condition) throw new Error(message); };
@@ -133,16 +133,38 @@ function harmonyState(app) {
     publicationState: publication[rawState] ?? 'unknown' };
 }
 
+function harmonyTarget(store) {
+  need(object(store) && versionId(store.appId) && packageName(store.bundleId), 'Expected Harmony app and bundle identity');
+  return { provider: 'appgallery-connect', platform: 'HARMONY', appId: store.appId, bundleId: store.bundleId, region: 'CN' };
+}
+
+function harmonyContext(options, signal) {
+  return { plan: { appIds: { harmony: options.store.bundleId } },
+    config: { stores: { harmony: options.store } }, env: options.environment ?? process.env,
+    signal, fetch: options.fetch };
+}
+
+export async function listHarmonyReleases(options) {
+  const target = harmonyTarget(options.store);
+  return observe(options, target, async signal => {
+    const result = await listAgcReleases(harmonyContext(options, signal));
+    const versions = result.ok ? result.versions.map(({ releaseState, ...version }) => ({
+      ...version, ...harmonyState({ releaseType: version.releaseType, releaseState }),
+    })) : [];
+    return { operation: 'store-versions', coverage: 'cn-harmony-returned-formal-test-versions',
+      versions, excludedReleaseCount: result.excludedReleaseCount ?? null,
+      errors: result.ok ? [] : [{ code: result.code, reason: 'read-unavailable' }] };
+  });
+}
+
 export async function getHarmonyRelease(options) {
   const { store, releaseType, versionId: candidate } = options;
-  need(object(store) && typeof store.appId === 'string' && /^\d{1,32}$/.test(store.appId) && packageName(store.bundleId), 'Expected Harmony app and bundle identity');
+  const target = { ...harmonyTarget(store), releaseType, versionId: candidate };
   need([1, 6].includes(releaseType) && versionId(candidate), 'Expected Harmony releaseType 1/6 and exact versionId');
   need(!store.versionId || store.versionId === candidate, 'Configured Harmony version differs from the requested version');
-  const target = { provider: 'appgallery-connect', platform: 'HARMONY', appId: store.appId, bundleId: store.bundleId, releaseType, versionId: candidate, region: 'CN' };
   return observe(options, target, async signal => {
-    const result = await inspectAgc({ plan: { appIds: { harmony: store.bundleId } },
-      config: { stores: { harmony: store } }, env: options.environment ?? process.env,
-      signal, fetch: options.fetch }, { releaseType, versionId: candidate, preflight: options.preflight === true });
+    const result = await inspectAgc(harmonyContext(options, signal),
+      { releaseType, versionId: candidate, preflight: options.preflight === true });
     signal.throwIfAborted();
     const errors = result.ok ? [] : result.checks.filter(check => !check.ok).map(check => ({ code: check.code, reason: 'read-unavailable' }));
     if (result.ok && result.app.releaseState === undefined) errors.push({ code: 'release-state', reason: 'missing-state' });
