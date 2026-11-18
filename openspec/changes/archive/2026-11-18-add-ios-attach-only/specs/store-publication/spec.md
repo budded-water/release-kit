@@ -11,8 +11,12 @@ upload-only iOS release to an explicit existing manual draft before review.
 - **AND** the action leaves upload, release settings, review submission and publication intent unchanged
 
 #### Scenario: Identity or ownership conflict
-- **WHEN** another build is selected, the draft or build is missing or stale, or local ownership or acceptance is invalid
+- **WHEN** another build is selected, provider reads disagree on the relationship, the draft or build is missing or stale, or local ownership or acceptance is invalid
 - **THEN** the runner refuses the write instead of claiming or replacing the target
+
+#### Scenario: Source changes during provider verification
+- **WHEN** the source is no longer currently eligible after the provider checks
+- **THEN** the runner refuses before recording intent or sending the PATCH
 
 #### Scenario: Reconciliation without another write
 - **WHEN** the same build is already selected or an earlier attachment attempt exists

@@ -8,12 +8,13 @@ import { join } from 'node:path';
 import { createRunner } from '../src/engine.mjs';
 import { createPlan } from '../src/plan.mjs';
 import { runCommand } from '../src/command.mjs';
-import { digest, loadState, releasePath, saveState } from '../src/state.mjs';
+import { acquireLock, digest, loadState, releasePath, saveState } from '../src/state.mjs';
 import { main } from '../src/cli.mjs';
 import { loadStoreContent } from '../src/store-content.mjs';
 import { createRequest, dispatchRequest, runRequest, readRequestStatus, inspectDispatchRequests } from '../src/executor.mjs';
 import { workerMain } from '../src/worker.mjs';
 import { createResourceLifecycle } from '../src/resource-lifecycle.mjs';
+import { inspectResourceReferences } from '../src/resource-references.mjs';
 import { acquireActivity, acquireMaintenance } from '../src/coordination.mjs';
 import { executionHandlers } from '../src/execution.mjs';
 
@@ -589,8 +590,8 @@ function boundedAdapter(f) {
   };
 }
 
-async function attachFixture(t) {
-  const f = await fixture(t, ['ios']);
+async function attachFixture(t, { managed = false } = {}) {
+  const f = managed ? await lifecycleFixture(t) : await fixture(t, ['ios']);
   f.config.stores = { ios: { appId: '123', bundleId: 'example.synthetic', apiKeyPathEnv: 'ATTACH_TEST_KEY' } };
   await writeFile(f.configPath, JSON.stringify(f.config));
   f.plan = await createPlan({ repo: f.repo, ref: 'HEAD', platforms: ['ios'], config: f.config });
@@ -610,13 +611,14 @@ async function attachFixture(t) {
   assert.equal(await f.cli(['upload', f.plan.id]), 0);
   const state = () => loadState(releasePath(f.store, f.plan.id));
   const remote = { versionId: 'manual-draft', buildId: 'apple-build', selected: null,
-    state: 'PREPARE_FOR_SUBMISSION', releaseType: 'MANUAL', processing: 'VALID', expired: false, relationshipMissing: false, onPatch: null, onFreshBuild: null };
+    state: 'PREPARE_FOR_SUBMISSION', releaseType: 'MANUAL', processing: 'VALID', expired: false, relationshipMissing: false, snapshotSelected: undefined,
+    onPatch: null, onFreshBuild: null };
   const requests = [];
   const build = id => ({ id, type: 'builds', attributes: { version: '1', processingState: remote.processing, expired: remote.expired },
     relationships: { preReleaseVersion: { data: { id: 'pre-version', type: 'preReleaseVersions' } } } });
-  const draft = () => ({ id: remote.versionId, type: 'appStoreVersions', attributes: {
+  const draft = (selected = remote.selected) => ({ id: remote.versionId, type: 'appStoreVersions', attributes: {
     versionString: '1.0.0', appVersionState: remote.state, releaseType: remote.releaseType, platform: 'IOS',
-  }, relationships: { build: { data: remote.selected ? { id: remote.selected, type: 'builds' } : null } } });
+  }, relationships: { build: { data: selected ? { id: selected, type: 'builds' } : null } } });
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     const u = new URL(url), method = options.method ?? 'GET';
     requests.push({ method, path: u.pathname });
@@ -649,9 +651,11 @@ async function attachFixture(t) {
         return Response.json({ data: [build(remote.buildId)], included: [{ id: 'pre-version', type: 'preReleaseVersions',
           attributes: { version: '1.0.0', platform: 'IOS' } }] });
       case '/v1/builds/apple-build':
-        remote.onFreshBuild?.();
+        await remote.onFreshBuild?.();
         return Response.json({ data: build(remote.buildId) });
-      case '/v1/appStoreVersions/manual-draft': return Response.json({ data: draft() });
+      case '/v1/appStoreVersions/manual-draft':
+        assert.equal(u.searchParams.get('include'), 'build');
+        return Response.json({ data: draft(remote.snapshotSelected) });
       case '/v1/appStoreVersions/manual-draft/relationships/build':
         return Response.json(remote.relationshipMissing ? {} : { data: draft().relationships.build.data });
       default: throw new Error('Unexpected synthetic request');
@@ -667,6 +671,13 @@ async function attachFixture(t) {
   const owner = join(f.store, 'targets', `${digest({ appId: 'example.synthetic', platform: 'ios', destination: 'app-store' })}.json`);
   return { ...f, state, remote, requests, invoke, owner };
 }
+
+test('attach runner refuses an unknown release without creating a journal directory', async t => {
+  const f = await fixture(t, ['ios']);
+  await assert.rejects(f.runner().attachBuild(f.plan, { versionId: 'manual-draft' }), /Unknown release ID/);
+  await assert.rejects(readdir(join(f.store, 'releases')), { code: 'ENOENT' });
+  await inspectResourceReferences(f.store, { references: async () => [] });
+});
 
 test('attach CLI binds the journaled build once, preserves upload-only intent and can read-confirm again', async t => {
   const f = await attachFixture(t);
@@ -728,6 +739,45 @@ test('attach CLI reconciles a lost response and fences publication until confirm
   assert.equal(f.requests.filter(r => r.method === 'PATCH').length, 1);
 });
 
+test('a successful PATCH response cannot confirm an empty relationship', async t => {
+  const f = await attachFixture(t);
+  f.remote.onPatch = () => new Response(null, { status: 204 });
+  const first = await f.invoke();
+  assert.equal(first.exit, 2);
+  assert.equal(first.report.state, 'unknown');
+  const patch = f.requests.findIndex(request => request.method === 'PATCH');
+  assert.ok(patch >= 0);
+  assert.deepEqual(f.requests.at(-1), { method: 'GET', path: f.requests[patch].path });
+  assert.ok(f.requests.length > patch + 1);
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'intent');
+  await assert.rejects(f.cli(['resume', f.plan.id, '--publish']), /Reconcile the pending iOS attachment/);
+  assert.equal((await f.invoke()).exit, 2);
+  assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
+});
+
+test('attach honors both locks and only uses an existing managed admission', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const target = digest({ appId: 'example.synthetic', platform: 'ios', destination: 'app-store' });
+  for (const name of [f.plan.id, `target-${target}`]) {
+    const unlock = await acquireLock(join(f.store, 'locks', `${name}.lock`));
+    try { await assert.rejects(f.invoke(), /Execution lock exists/); }
+    finally { await unlock(); }
+  }
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  f.options.resourceLifecycle = lifecycle;
+  await assert.rejects(f.invoke(), { code: 'RESOURCE_ADMISSION' });
+  assert.deepEqual(f.requests, []);
+  const operation = await lifecycle.run({ plan: f.plan, operation: 'execute', execute: async resourceSession => {
+    const runner = createRunner({ ...f.options, resourceSession });
+    const maintenance = runner.resourceMaintenance;
+    const report = await runner.attachBuild(f.plan, { versionId: 'manual-draft' });
+    assert.equal(runner.resourceMaintenance, maintenance);
+    return report;
+  } });
+  assert.equal(operation.result.state, 'attached');
+  assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
+});
+
 test('an interrupted attachment retains intent and a new command only reads back', async t => {
   const f = await attachFixture(t);
   const controller = new AbortController();
@@ -761,12 +811,15 @@ test('attach refuses stale provider identity, inactive ownership and scope expan
   f.remote.relationshipMissing = true;
   await assert.rejects(f.invoke(), /relationship is unavailable/);
   f.remote.relationshipMissing = false;
+  f.remote.snapshotSelected = 'different-build';
+  await assert.rejects(f.invoke(), /inconsistent/);
+  f.remote.snapshotSelected = undefined;
   f.remote.onFreshBuild = () => { f.remote.selected = 'different-build'; };
   await assert.rejects(f.invoke(), /different build/);
   f.remote.selected = null;
-  f.remote.onFreshBuild = null;
-  await runCommand('git', ['commit', '--allow-empty', '-qm', 'new default source'], { cwd: f.repo });
+  f.remote.onFreshBuild = () => runCommand('git', ['commit', '--allow-empty', '-qm', 'new default source'], { cwd: f.repo });
   await assert.rejects(f.invoke(), /must equal the current remote default branch head/);
+  f.remote.onFreshBuild = null;
   await rm(f.owner);
   const count = f.requests.length;
   await assert.rejects(f.invoke(), /Existing publication target ownership/);
@@ -1029,7 +1082,7 @@ test('confirmed same-content draft with no binary intent can transfer to a newer
   }
 });
 
-test('real prepared-draft apply and bounded upload retain one draft and separate provider effects', async t => {
+test('prepared draft, bounded upload and attach retain one draft and separate provider effects', async t => {
   for (const driftAfterOwnership of [false, true]) {
     const f = await fixture(t, ['ios']);
     f.config.stores = { ios: { contentPath: 'content.json', metadataPath: 'metadata',
@@ -1048,10 +1101,11 @@ test('real prepared-draft apply and bounded upload retain one draft and separate
       publicKeyEncoding: { type: 'spki', format: 'pem' } }).privateKey;
     await writeFile(keyPath, JSON.stringify({ key_id: 'synthetic', issuer_id: 'synthetic', key }));
     f.options.environment = { ...process.env, SYNTHETIC_STORE_KEY: keyPath };
-    const remote = { notes: 'Old notes', uploaded: false };
+    const remote = { notes: 'Old notes', uploaded: false, selection: null };
+    let attachAllowed = false;
     const version = () => ({ id: 'retained-draft', type: 'appStoreVersions', attributes: {
-      versionString: '1.0.0', appStoreState: 'PREPARE_FOR_SUBMISSION', releaseType: 'MANUAL',
-    }, relationships: { build: { data: null } } });
+      versionString: '1.0.0', appStoreState: 'PREPARE_FOR_SUBMISSION', releaseType: 'MANUAL', platform: 'IOS',
+    }, relationships: { build: { data: remote.selection } } });
     const locale = () => ({ id: 'en', attributes: { locale: 'en-US', whatsNew: remote.notes,
       description: 'Saved description', keywords: 'synthetic', supportUrl: 'https://example.invalid' } });
     const sets = [{ id: 'saved-set', attributes: { screenshotDisplayType: 'APP_IPHONE_67' } }];
@@ -1093,20 +1147,37 @@ test('real prepared-draft apply and bounded upload retain one draft and separate
     };
     f.adapters.ios.contentSession = async () => api;
     const provider = async (url, options) => {
-      assert.ok(!options.method || options.method === 'GET', 'upload must not write listing, select a build or submit review');
+      const pathname = new URL(url).pathname;
+      const relationship = '/v1/appStoreVersions/retained-draft/relationships/build';
+      if (options.method === 'PATCH' && attachAllowed) {
+        assert.equal(pathname, relationship);
+        const state = await loadState(releasePath(f.store, successor.id));
+        assert.equal(state.checkpoints.ios['ios-attach'].state, 'intent');
+        const data = JSON.parse(options.body).data;
+        assert.deepEqual(data, { type: 'builds', id: 'uploaded-build' });
+        effects.push('build-linkage');
+        remote.selection = data;
+        return new Response(null, { status: 204 });
+      }
+      assert.ok(!options.method || options.method === 'GET', 'only attach may write the build linkage');
       reads.push(url);
       const ok = (data, included = []) => ({ ok: true, status: 200, json: async () => ({ data, included }) });
       if (url.endsWith('/v1/apps/123')) return ok({ attributes: { bundleId: 'example.synthetic' } });
+      if (pathname === relationship) return ok(remote.selection);
+      if (pathname === '/v1/appStoreVersions/retained-draft') return ok(version());
       if (url.includes('/appStoreVersions?')) return ok([version()]);
+      if (url.includes('/appInfos?')) return ok([]);
       if (url.includes('/appStoreVersionLocalizations?')) return ok([locale()]);
       if (url.includes('/appScreenshotSets?')) return ok(sets);
       if (url.includes('/appScreenshots?')) return ok(images);
       if (url.endsWith('/appStoreReviewDetail')) return ok({ attributes: { contactFirstName: 'Synthetic',
         contactLastName: 'Contact', contactPhone: '000', contactEmail: 'test@example.invalid', demoAccountRequired: false } });
       if (url.includes('/buildUploads?')) return ok([]);
-      if (url.includes('/v1/builds?')) return ok(remote.uploaded ? [{ id: 'uploaded-build', type: 'builds',
-        attributes: { version: '2', processingState: 'VALID' },
-        relationships: { preReleaseVersion: { data: { id: 'pre-version' } } } }] : [],
+      const build = { id: 'uploaded-build', type: 'builds',
+        attributes: { version: '2', processingState: 'VALID', expired: false },
+        relationships: { preReleaseVersion: { data: { id: 'pre-version' } } } };
+      if (pathname === '/v1/builds/uploaded-build') return ok(build);
+      if (url.includes('/v1/builds?')) return ok(remote.uploaded ? [build] : [],
         [{ id: 'pre-version', type: 'preReleaseVersions', attributes: { version: '1.0.0', platform: 'IOS' } }]);
       throw Error(`Unexpected upload read ${url}`);
     };
@@ -1162,6 +1233,22 @@ test('real prepared-draft apply and bounded upload retain one draft and separate
       assert.equal(result.checkpoints.ios['ios-upload'].buildId, 'uploaded-build');
       assert.equal(result.supersessions[0].preparedContent.versionId, 'retained-draft');
       assert.deepEqual(effects, ['listing-text', 'binary-upload']);
+
+      t.mock.method(globalThis, 'fetch', provider);
+      const runner = f.runner();
+      await assert.rejects(runner.attachBuild(successor, { versionId: 'replacement-draft' }),
+        /same recorded prepared draft/);
+      remote.notes = 'Changed listing after upload';
+      await assert.rejects(runner.attachBuild(successor, { versionId: 'retained-draft' }), /listing or screenshots changed/);
+      const beforeAttach = await loadState(releasePath(f.store, successor.id));
+      assert.equal(beforeAttach.checkpoints.ios['ios-attach'], undefined);
+      assert.equal(remote.selection, null);
+      assert.deepEqual(effects, ['listing-text', 'binary-upload']);
+      remote.notes = 'Reviewed notes';
+      attachAllowed = true;
+      const attached = await runner.attachBuild(successor, { versionId: 'retained-draft' });
+      assert.equal(attached.state, 'attached');
+      assert.deepEqual(effects, ['listing-text', 'binary-upload', 'build-linkage']);
     }
   }
 });

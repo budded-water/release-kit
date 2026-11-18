@@ -3,6 +3,7 @@ import { delimiter, dirname, join } from 'node:path';
 import {
   acquireLock as acquireStateLock,
   atomicJson,
+  canonicalPrivatePath,
   digest,
   loadState,
   privateDirectory,
@@ -742,20 +743,22 @@ export function createRunner({
   }
   async function withRelease(plan, task, operation = 'execute') {
     if (resourceSession) return resourceContext.run(resourceSession, () => admittedRelease(plan, task));
-    if (!resourceLifecycle || operation === null) return admittedRelease(plan, task);
+    if (!resourceLifecycle) return admittedRelease(plan, task);
     const completed = await resourceLifecycle.run({ plan, operation, lease: resourceLease,
       execute: session => resourceContext.run(session, () => admittedRelease(plan, task)) });
     resourceMaintenance = completed.maintenance;
     return completed.result;
   }
-  async function admittedRelease(plan, task) {
+  async function admittedRelease(plan, task, { existingOnly = false } = {}) {
     await assertResourceAdmission({ store, plan, session: resourceContext.getStore() });
     await cleanup.assertSafe();
     const directory = releasePath(store, plan.id);
-    await privateDirectory(directory);
+    if (!existingOnly) await privateDirectory(directory);
     const unlock = await acquireLock(join(store, 'locks', `${plan.id}.lock`));
     try {
+      if (existingOnly) await canonicalPrivatePath(join(directory, 'events'));
       let state = await loadState(directory);
+      if (existingOnly && !state) throw new Error('Unknown release ID');
       if (state && digest(state.plan) !== digest(plan))
         throw new Error('Release plan identity mismatch');
       state ??= {
@@ -832,7 +835,7 @@ export function createRunner({
       throw new Error('Attach requires one existing iOS App Store release');
     if (digest(config) !== plan.configDigest)
       throw new Error('Attach requires the original release configuration');
-    return withRelease(plan, async (state, directory) => {
+    const task = async (state, directory) => {
       const artifact = state.artifacts.ios;
       const accepted = state.acceptance.ios;
       if (state.stages['build-ios']?.status !== 'succeeded' || !artifact ||
@@ -850,7 +853,8 @@ export function createRunner({
       } finally {
         await unlock();
       }
-    }, null);
+    };
+    return resourceContext.run(resourceSession, () => admittedRelease(plan, task, { existingOnly: true }));
   }
   async function validate(plan, { ui = false } = {}) {
     if (typeof ui !== 'boolean') throw new Error('UI validation selection must be boolean');

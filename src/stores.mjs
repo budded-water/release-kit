@@ -1418,15 +1418,17 @@ export async function attachStoreBuild(ctx, { versionId } = {}) {
   const draft = `${APPLE}/v1/appStoreVersions/${segment(versionId)}`;
   const relationship = `${draft}/relationships/build`;
   const readSelection = async () => {
-    const version = (await request(ctx, draft, token))?.data;
+    const version = (await request(ctx, `${draft}?include=build`, token))?.data;
     if (version?.type !== 'appStoreVersions' || version.id !== versionId ||
         version.attributes?.platform !== 'IOS' || version.attributes?.versionString !== artifact.version ||
         (version.attributes.appVersionState ?? version.attributes.appStoreState) !== 'PREPARE_FOR_SUBMISSION' ||
         version.attributes.releaseType !== 'MANUAL')
       throw new StoreError('The selected iOS draft is no longer an editable manual draft.');
+    const snapshot = version.relationships?.build?.data;
     const selected = (await request(ctx, relationship, token))?.data;
-    if (selected !== null && (selected?.id !== buildId || selected.type !== 'builds'))
-      throw new StoreError('The draft build relationship is unavailable or points to a different build.');
+    const expected = linkage => linkage === null || (linkage?.id === buildId && linkage.type === 'builds');
+    if (!expected(snapshot) || !expected(selected) || (snapshot === null) !== (selected === null))
+      throw new StoreError('The draft build relationship is unavailable, inconsistent or points to a different build.');
     return selected;
   };
   const finish = async (writeAttempted) => {
@@ -1451,9 +1453,7 @@ export async function attachStoreBuild(ctx, { versionId } = {}) {
   const freshBuild = (await request(ctx, `${APPLE}/v1/builds/${segment(buildId)}`, token))?.data;
   if (!validBuild(freshBuild)) throw new StoreError('The uploaded build is no longer eligible for attachment.');
   if (await readSelection()) return finish(false);
-  ctx.signal?.throwIfAborted();
-  await ctx.checkpoint('ios-attach', { state: 'intent', versionId, buildId,
-    identity: artifact, recordedAt: now() });
+  await save(ctx, 'ios-attach', { state: 'intent', versionId, buildId });
   try {
     await request(ctx, relationship, token, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },

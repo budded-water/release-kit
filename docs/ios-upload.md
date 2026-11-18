@@ -75,8 +75,9 @@ operation supports manual drafts in `PREPARE_FOR_SUBMISSION` and refuses to
 replace a different selected build.
 
 The first write requires the existing production source gate and, when configured,
-prepared Apple content verification. After rechecking the build and relationship,
-the runner saves `ios-attach` intent and makes one Apple build relationship PATCH.
+prepared Apple content verification. The draft snapshot and relationship read
+must agree. The runner rechecks the build and current source before saving
+`ios-attach` intent and making one Apple build relationship PATCH.
 Exit `0` means a separate read confirmed the exact attachment, including when the
 same build was already selected. Exit `2` means the operation was refused or the
 attachment cannot be confirmed. Cancellation through the CLI returns `130` and
