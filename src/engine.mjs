@@ -476,7 +476,7 @@ export function createRunner({
         return false;
       const providerKeys =
         platform === 'ios'
-          ? ['ios-upload', 'ios-review']
+          ? ['ios-upload', 'ios-review', 'ios-attach']
           : ['android-edit', 'android-upload', 'android-track', 'android-commit'];
       const hasProviderIntent = (checkpoints) =>
         Object.keys(checkpoints).some((name) => name !== 'expo.environment');
@@ -504,6 +504,10 @@ export function createRunner({
         );
       }
       const checkpoints = previous.checkpoints?.[platform] ?? {};
+      const attachment = platform === 'ios' ? checkpoints['ios-attach'] : undefined;
+      if (attachment && (attachment.state !== 'attached' ||
+          attachment.buildId !== checkpoints['ios-upload']?.buildId))
+        return false;
       const unpublished = !hasProviderIntent(checkpoints);
       const prepared = previous.storePreparation?.[platform];
       const proposed = state.storePreparation?.[platform];
@@ -585,6 +589,8 @@ export function createRunner({
           String(platform === 'ios' ? proof.buildNumber : proof.versionCode) !==
             String(artifact.buildNumber) ||
           !(platform === 'ios' ? proof.buildId : proof.editId) ||
+          (attachment && (proof.buildId !== attachment.buildId ||
+            (proof.versionId !== null && proof.versionId !== attachment.versionId))) ||
           (platform === 'android' && proof.editId !== checkpoints['android-edit']?.id) ||
           (unuploadedEdit && (proof.uploadState !== 'absent' || proof.track !== 'production'))
         )

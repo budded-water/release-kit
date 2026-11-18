@@ -127,6 +127,7 @@ function appleProvider(
     afterUpload,
     remoteBuild = build,
     includedBuilds = [remoteBuild],
+    buildRelationship,
   } = {},
 ) {
   f.ctx.fetch = async (url, opts) => {
@@ -139,6 +140,8 @@ function appleProvider(
     if (url.includes('/v1/builds?'))
       return ok({ data: hasBuild || afterUpload?.() ? [remoteBuild] : [], included: [preVersion] });
     if (url.includes('/buildUploads?')) return ok({ data: [] });
+    if (url.endsWith('/relationships/build') && buildRelationship)
+      return ok({ data: buildRelationship() });
     throw new Error('Unexpected Apple fake request');
   };
 }
@@ -1169,18 +1172,23 @@ test('an iOS draft without a selected build still permits submission of the jour
   assert.equal(f.commands[0].args[0], 'deliver');
 });
 
-test('iOS publication refuses if a confirmed attach-only relationship was removed', async t => {
-  const f = await fixture(t, 'ios');
-  f.checkpoint('ios-upload', { state: 'uploaded', buildId: 'build-42' });
-  f.checkpoint('ios-attach', { state: 'attached', versionId: 'version-2', buildId: 'build-42' });
-  const version = appVersion('PREPARE_FOR_SUBMISSION');
-  version.relationships.build.data = null;
-  appleProvider(f, { versions: [version] });
+test('iOS publication refuses a removed confirmed relationship even when version inventory is stale', async t => {
+  for (const removedAtRead of [1, 2]) {
+    const f = await fixture(t, 'ios');
+    f.checkpoint('ios-upload', { state: 'uploaded', buildId: 'build-42' });
+    f.checkpoint('ios-attach', { state: 'attached', versionId: 'version-2', buildId: 'build-42' });
+    const version = appVersion('PREPARE_FOR_SUBMISSION');
+    const linkage = version.relationships.build.data;
+    linkage.type = 'builds';
+    let reads = 0;
+    appleProvider(f, { versions: [version], buildRelationship: () => ++reads === removedAtRead ? null : linkage });
 
-  await assert.rejects(publishStore(f.ctx), /confirmed iOS attachment changed/);
-  assert.equal(f.commands.length, 0);
-  assert.equal(f.calls.some(call => call.opts.method), false);
-  assert.deepEqual(f.journal, []);
+    await assert.rejects(publishStore(f.ctx), /confirmed iOS attachment changed/);
+    assert.equal(reads, removedAtRead);
+    assert.equal(f.commands.length, 0);
+    assert.equal(f.calls.some(call => call.opts.method), false);
+    assert.ok(f.journal.every(event => event.name === 'ios-upload'));
+  }
 });
 
 test('ambiguous exact iOS versions never choose the first version for publication', async (t) => {

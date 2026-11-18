@@ -89,8 +89,11 @@ Rerun `attach` with the same release and draft to reconcile an unknown result.
 A missing relationship cannot authorize another PATCH after intent. The journal
 preserves the upload receipt and original approval scope. Plain resume continues
 its prior upload-only behavior. Explicit full publication requires a confirmed attachment if this operation was
-attempted. The built-in iOS publisher also checks that the recorded build is
-still selected. `attach` itself changes only the build linkage. It does not
+attempted. The built-in iOS publisher verifies the recorded build through
+the draft relationship endpoint before proceeding. A confirmed attachment can
+use the existing unsubmitted-upload handoff when fresh provider evidence still
+matches the recorded build and any surviving draft. An unresolved attachment
+blocks that handoff. `attach` itself changes only the build linkage. It does not
 schedule work, run Fastlane, upload, change release settings or submit for review.
 
 The runner method is `runner.attachBuild(plan, { versionId })`. It uses the same
@@ -103,7 +106,7 @@ command with its existing admission rules before adoption.
 journals without that checkpoint can attach when their exact confirmed upload
 is recorded. Older cores can read the history, but do not enforce the attachment
 fence, so use an attach-aware core for further publication from these journals.
-The standalone `release-kit-store` query launcher remains read-only. Separate
+The `release-kit` store query subcommands remain read-only. Separate
 state stores or external clients can still race between the final Apple read and
 write. The relationship API exposes no conditional update for that interval.
 

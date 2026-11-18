@@ -1,6 +1,6 @@
 import test from 'node:test';
 import { generateKeyPairSync, verify } from 'node:crypto';
-import { uploadStore } from '../src/stores.mjs';
+import { statusStore, uploadStore } from '../src/stores.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, realpath, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -681,7 +681,12 @@ test('attach runner refuses an unknown release without creating a journal direct
 
 test('attach CLI binds the journaled build once, preserves upload-only intent and can read-confirm again', async t => {
   const f = await attachFixture(t);
+  assert.equal(await f.cli(['resume', f.plan.id]), 0);
   const before = await f.state();
+  assert.equal(before.checkpoints.ios['ios-attach'], undefined);
+  assert.equal(before.publicationRequested, false);
+  assert.equal(f.remote.selected, null);
+  assert.equal(f.requests.some(request => request.method !== 'GET'), false);
   const owner = await readFile(f.owner);
   const first = await f.invoke();
   assert.equal(first.exit, 0);
@@ -778,6 +783,39 @@ test('attach honors both locks and only uses an existing managed admission', asy
   assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
 });
 
+test('attachment preserves the existing confirmed unsubmitted-upload handoff boundary', async t => {
+  for (const variant of ['confirmed', 'cleared', 'pending', 'replacement-draft']) await t.test(variant, async t => {
+    const f = await attachFixture(t);
+    if (variant === 'pending') f.remote.onPatch = () => new Response(null, { status: 204 });
+    assert.equal((await f.invoke()).exit, variant === 'pending' ? 2 : 0);
+    if (variant === 'replacement-draft') f.remote.versionId = 'other-draft';
+    if (variant === 'cleared') f.remote.selected = null;
+    const canHandOff = ['confirmed', 'cleared'].includes(variant);
+    f.adapters.ios.status = statusStore;
+    await runCommand('git', ['commit', '--allow-empty', '-qm', 'newer source'], { cwd: f.repo });
+    const build = f.adapters.ios.build;
+    f.adapters.ios.build = async ctx => ({ ...await build(ctx), buildNumber: '2' });
+    const next = await createPlan({ repo: f.repo, ref: 'HEAD', platforms: ['ios'], config: f.config });
+    const built = await f.runner().execute(next);
+    await f.runner().execute(next, { acceptance: await f.receipts(built) });
+    const result = await f.runner().execute(next, { uploadOnly: true });
+    const previous = await f.state();
+
+    if (canHandOff) {
+      assert.equal(result.outcomes.ios.state, 'uploaded');
+      assert.equal(previous.supersededBy.ios.releaseId, next.id);
+      assert.equal(result.supersessions[0].reason, 'confirmed-unsubmitted-upload');
+    } else {
+      assert.equal(result.outcomes.ios.state, 'blocked');
+      assert.equal(previous.supersededBy, undefined);
+      assert.equal(result.checkpoints.ios?.['ios-upload'], undefined);
+    }
+    assert.equal(previous.checkpoints.ios['ios-attach'].state, variant === 'pending' ? 'intent' : 'attached');
+    assert.equal(JSON.parse(await readFile(f.owner, 'utf8')).id, canHandOff ? next.id : f.plan.id);
+    assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
+  });
+});
+
 test('an interrupted attachment retains intent and a new command only reads back', async t => {
   const f = await attachFixture(t);
   const controller = new AbortController();
@@ -811,9 +849,15 @@ test('attach refuses stale provider identity, inactive ownership and scope expan
   f.remote.relationshipMissing = true;
   await assert.rejects(f.invoke(), /relationship is unavailable/);
   f.remote.relationshipMissing = false;
-  f.remote.snapshotSelected = 'different-build';
-  await assert.rejects(f.invoke(), /inconsistent/);
+  for (const [snapshot, selection] of [['apple-build', null], [null, 'apple-build']]) {
+    f.remote.snapshotSelected = snapshot;
+    f.remote.selected = selection;
+    await assert.rejects(f.invoke(), /inconsistent/);
+    assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+    assert.equal(f.requests.some(request => request.method !== 'GET'), false);
+  }
   f.remote.snapshotSelected = undefined;
+  f.remote.selected = null;
   f.remote.onFreshBuild = () => { f.remote.selected = 'different-build'; };
   await assert.rejects(f.invoke(), /different build/);
   f.remote.selected = null;
