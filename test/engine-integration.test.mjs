@@ -1,8 +1,10 @@
 import test from 'node:test';
 import { generateKeyPairSync, verify } from 'node:crypto';
-import { statusStore, uploadStore } from '../src/stores.mjs';
+import { attachStoreBuild, statusStore, uploadStore } from '../src/stores.mjs';
 import assert from 'node:assert/strict';
-import { mkdtemp, realpath, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
+import fs from 'node:fs/promises';
+import { mkdtemp, realpath, mkdir, writeFile, readFile, readdir, rename, rm } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRunner } from '../src/engine.mjs';
@@ -14,8 +16,9 @@ import { loadStoreContent } from '../src/store-content.mjs';
 import { createRequest, dispatchRequest, runRequest, readRequestStatus, inspectDispatchRequests } from '../src/executor.mjs';
 import { workerMain } from '../src/worker.mjs';
 import { createResourceLifecycle } from '../src/resource-lifecycle.mjs';
+import { appendResourceState, readResourceLedger } from '../src/resource-ledger.mjs';
 import { inspectResourceReferences } from '../src/resource-references.mjs';
-import { acquireActivity, acquireMaintenance } from '../src/coordination.mjs';
+import { acquireActivity, acquireMaintenance, assertCoordinationOwner } from '../src/coordination.mjs';
 import { executionHandlers } from '../src/execution.mjs';
 
 async function fixture(t, platforms = ['ios', 'android']) {
@@ -164,7 +167,7 @@ async function lifecycleFixture(t, platforms = ['ios']) {
   return f;
 }
 
-async function enableResourceLifecycle(f, stage = 'ui-eval', cacheBudgetBytes = 8) {
+async function configureResourceLifecycle(f, stage, cacheBudgetBytes, signal) {
   const anchor = join(f.base, 'coordination');
   await mkdir(anchor, { mode: 0o700 });
   await mkdir(f.store, { mode: 0o700, recursive: true });
@@ -176,8 +179,12 @@ async function enableResourceLifecycle(f, stage = 'ui-eval', cacheBudgetBytes = 
       inputsAvailable: true, recoveryIndependent: true }) };
   const policy = { schemaVersion: 1, coordinationAnchor: anchor, cacheBudgetBytes,
     minimumFreeBytes: 1, phaseBytes: { validate: 1, execute: 1, content: 1 } };
-  const lifecycle = createResourceLifecycle({ stateDirectory: f.store, policy, adapter });
-  const lease = await acquireMaintenance(anchor, { operation: 'synthetic lifecycle activation' });
+  return createResourceLifecycle({ stateDirectory: f.store, policy, adapter, signal });
+}
+
+async function enableResourceLifecycle(f, stage = 'ui-eval', cacheBudgetBytes = 8, signal) {
+  const lifecycle = await configureResourceLifecycle(f, stage, cacheBudgetBytes, signal);
+  const lease = await acquireMaintenance(lifecycle.coordinationAnchor, { operation: 'synthetic lifecycle activation' });
   await lifecycle.activate({ lease });
   await lease.release();
   const hook = stage === 'checks' ? 'checkSource' : 'evaluateUI';
@@ -590,9 +597,16 @@ function boundedAdapter(f) {
   };
 }
 
-async function attachFixture(t, { managed = false } = {}) {
+async function attachFixture(t, { managed = false, prepared = false } = {}) {
   const f = managed ? await lifecycleFixture(t) : await fixture(t, ['ios']);
   f.config.stores = { ios: { appId: '123', bundleId: 'example.synthetic', apiKeyPathEnv: 'ATTACH_TEST_KEY' } };
+  if (prepared) {
+    f.config.stores.ios.contentPath = 'content.json';
+    await writeFile(join(f.repo, 'content.json'), JSON.stringify({ schemaVersion: 1, platform: 'ios',
+      version: '1.0.0', locales: [{ locale: 'en-US', fields: { whatsNew: 'Synthetic notes' }, screenshots: [] }] }));
+    await runCommand('git', ['add', 'content.json'], { cwd: f.repo });
+    await runCommand('git', ['commit', '-qm', 'synthetic prepared content'], { cwd: f.repo });
+  }
   await writeFile(f.configPath, JSON.stringify(f.config));
   f.plan = await createPlan({ repo: f.repo, ref: 'HEAD', platforms: ['ios'], config: f.config });
   const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
@@ -614,6 +628,15 @@ async function attachFixture(t, { managed = false } = {}) {
     state: 'PREPARE_FOR_SUBMISSION', releaseType: 'MANUAL', processing: 'VALID', expired: false, relationshipMissing: false, snapshotSelected: undefined, linkageSelected: undefined,
     inventoryMissing: false, inventorySelected: undefined, draftDeleted: false, snapshotState: undefined,
     onPatch: null, onFreshBuild: null };
+  if (prepared) {
+    const directory = releasePath(f.store, f.plan.id);
+    const stored = await state();
+    const { inputDigest } = await loadStoreContent({ root: join(directory, 'build-ios'), config: f.config,
+      platform: 'ios', plan: f.plan, command: f.options.command });
+    stored.storePreparation = { ios: { status: 'prepared', inputDigest,
+      observation: { remote: { target: { id: remote.versionId } } } } };
+    await saveState(directory, stored);
+  }
   const requests = [];
   const build = id => ({ id, type: 'builds', attributes: { version: '1', processingState: remote.processing, expired: remote.expired },
     relationships: { preReleaseVersion: { data: { id: 'pre-version', type: 'preReleaseVersions' } } } });
@@ -786,6 +809,702 @@ test('attach honors both locks and only uses an existing managed admission', asy
     return report;
   } });
   assert.equal(operation.result.state, 'attached');
+  assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
+});
+
+test('preloading an inactive lifecycle policy preserves ordinary attachment', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await configureResourceLifecycle(f, 'checks', 8);
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic managed attachment' });
+  try {
+    f.options.resourceLease = lease;
+    await assert.rejects(f.invoke(), /activity lease requires its lifecycle policy/);
+    assert.deepEqual(f.requests, []);
+    f.options.resourceLifecycle = lifecycle;
+    await assert.rejects(f.invoke(), { code: 'RESOURCE_NOT_ACTIVATED' });
+    assert.deepEqual(f.requests, []);
+  } finally {
+    await lease.release();
+    delete f.options.resourceLease;
+  }
+  const attached = await f.invoke();
+  assert.equal(attached.exit, 0);
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'attached');
+  assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
+});
+
+test('a heavy session cannot delegate through the attach CLI before its configuration is loaded', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  await lifecycle.run({ plan: f.plan, operation: 'execute', execute: async resourceSession => {
+    await assert.rejects(main({ ...f.options, resourceSession,
+      args: ['attach', f.plan.id, '--state-dir', f.store, '--version-id', 'manual-draft',
+        '--config', join(f.base, 'missing-config.json')], output() {} }), /dedicated local invocation/);
+    return { state: 'uploaded' };
+  } });
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+  assert.deepEqual(f.requests, []);
+});
+
+async function displaceActivityRecord(f, lifecycle, lease, { replace = false } = {}) {
+  const owner = join(lifecycle.coordinationAnchor, 'activity-' + lease.owner.token + '.json');
+  const saved = join(f.base, 'original-owner.json');
+  await rename(owner, saved);
+  if (replace) await writeFile(owner, await readFile(saved), { mode: 0o600 });
+  return () => rename(saved, owner);
+}
+
+test('managed attach borrows its installed activity without starting a resource task', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  f.options.resourceLifecycle = lifecycle;
+  await assert.rejects(f.invoke(), { code: 'RESOURCE_ADMISSION' });
+  const otherAnchor = join(f.base, 'other-coordination');
+  await mkdir(otherAnchor, { mode: 0o700 });
+  const foreignLease = await acquireActivity(otherAnchor, { operation: 'synthetic foreign activity' });
+  try {
+    f.options.resourceLease = foreignLease;
+    await assert.rejects(f.invoke(), { code: 'COORDINATION_INVALID' });
+    assert.deepEqual(f.requests, []);
+  } finally {
+    await foreignLease.release();
+  }
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic managed attach' });
+  const owner = lease.owner;
+  const ledger = await readResourceLedger(f.store);
+  const calls = [...f.calls];
+  const another = { ...f.plan, id: 'release-' + 'e'.repeat(24) };
+  await saveState(releasePath(f.store, another.id), { ...(await f.state()), plan: another });
+  let session;
+  try {
+    await lifecycle.admitAttach({ plan: f.plan, lease, execute: async admitted => {
+      session = admitted;
+      const runner = createRunner({ ...f.options, resourceSession: admitted });
+      await assert.rejects(runner.validate(f.plan), { code: 'RESOURCE_ADMISSION' });
+      await assert.rejects(runner.attachBuild(another, { versionId: 'manual-draft' }),
+        { code: 'RESOURCE_ADMISSION' });
+      assert.equal((await loadState(releasePath(f.store, another.id))).checkpoints.ios['ios-attach'], undefined);
+    } });
+    await assert.rejects(createRunner({ ...f.options, resourceSession: session })
+      .attachBuild(f.plan, { versionId: 'manual-draft' }), { code: 'RESOURCE_ADMISSION' });
+    assert.deepEqual(f.requests, []);
+
+    f.options.resourceLease = lease;
+    f.remote.onFreshBuild = async () => {
+      await assert.rejects(lease.transition('maintenance'), /borrowed by an active operation/);
+      await assert.rejects(lease.release(), /borrowed by an active operation/);
+    };
+    const attached = await f.invoke();
+    assert.equal(attached.exit, 0);
+    assert.equal(attached.report.state, 'attached');
+    assert.equal(attached.report.writeAttempted, true);
+    assert.equal(lease.owner, owner);
+    await assertCoordinationOwner(lifecycle.coordinationAnchor, owner, 'activity');
+    assert.deepEqual(await readResourceLedger(f.store), ledger);
+    assert.deepEqual(f.calls, calls);
+  } finally {
+    await lease.release();
+  }
+  assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
+});
+
+test('managed attach refuses intent if activity or activation changes during provider reads', async t => {
+  for (const [variant, code] of [['owner-missing', 'COORDINATION_INVALID'],
+      ['owner-replaced', 'COORDINATION_INVALID'], ['marker-missing', 'RESOURCE_ADMISSION'],
+      ['marker-changed', 'RESOURCE_COMPATIBILITY']]) {
+    await t.test(variant, async t => {
+      const f = await attachFixture(t, { managed: true });
+      const lifecycle = await enableResourceLifecycle(f, 'checks');
+      const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic interrupted activity' });
+      f.options.resourceLifecycle = lifecycle;
+      f.options.resourceLease = lease;
+      const marker = join(f.store, 'resources', 'feature.json');
+      let restoreOwner;
+      f.remote.onFreshBuild = async () => {
+        if (variant.startsWith('owner-'))
+          restoreOwner = await displaceActivityRecord(f, lifecycle, lease, { replace: variant === 'owner-replaced' });
+        if (variant === 'marker-missing') await rm(marker);
+        if (variant === 'marker-changed') {
+          const saved = JSON.parse(await readFile(marker, 'utf8'));
+          await writeFile(marker, JSON.stringify({ ...saved, policy: 'f'.repeat(64) }));
+        }
+      };
+      try {
+        await assert.rejects(f.invoke(), { code });
+        assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+        assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+      } finally {
+        await restoreOwner?.();
+        await lease.release();
+      }
+    });
+  }
+});
+
+test('managed attach refuses unsettled lifecycle history before provider access', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  const maintenance = await acquireMaintenance(lifecycle.coordinationAnchor, { operation: 'record synthetic interrupted task' });
+  try {
+    const ledger = await readResourceLedger(f.store);
+    const id = '11111111-1111-4111-8111-111111111111';
+    ledger.state.tasks[id] = { id, releaseId: f.plan.id, source: f.plan.source, operation: 'execute',
+      state: 'active', owner: maintenance.owner.token, phase: 'execute', reservedBytes: 1 };
+    await appendResourceState(f.store, ledger, () => maintenance.assertOwnership());
+  } finally {
+    await maintenance.release();
+  }
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic attach before recovery' });
+  try {
+    f.options.resourceLifecycle = lifecycle;
+    f.options.resourceLease = lease;
+    await assert.rejects(f.invoke(), { code: 'RESOURCE_OWNERSHIP' });
+    assert.deepEqual(f.requests, []);
+    assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+  } finally {
+    await lease.release();
+  }
+});
+
+test('managed attach derives the same continuous guard from an existing heavy session', async t => {
+  for (const [variant, code] of [['owner-replaced', 'COORDINATION_INVALID'], ['marker-changed', 'RESOURCE_COMPATIBILITY']]) {
+    await t.test(variant, async t => {
+      const f = await attachFixture(t, { managed: true });
+      const lifecycle = await enableResourceLifecycle(f, 'checks');
+      const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic managed parent' });
+      const marker = join(f.store, 'resources', 'feature.json');
+      const markerBytes = await readFile(marker);
+      let restoreOwner;
+      f.remote.onFreshBuild = async () => {
+        if (variant === 'owner-replaced') {
+          restoreOwner = await displaceActivityRecord(f, lifecycle, lease, { replace: true });
+        } else {
+          await writeFile(marker, JSON.stringify({ ...JSON.parse(markerBytes), policy: 'f'.repeat(64) }));
+        }
+      };
+      try {
+        await lifecycle.run({ plan: f.plan, operation: 'execute', lease, execute: async resourceSession => {
+          try {
+            const runner = createRunner({ ...f.options, resourceSession });
+            await assert.rejects(runner.attachBuild(f.plan, { versionId: 'manual-draft' }), { code });
+            assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+            assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+          } finally {
+            await restoreOwner?.();
+            if (variant === 'marker-changed') await writeFile(marker, markerBytes);
+          }
+        } });
+      } finally {
+        await lease.release();
+      }
+    });
+  }
+});
+
+test('managed attach keeps intent when its activity ends after the write and reconciles under a fresh lease', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic interrupted write' });
+  f.options.resourceLifecycle = lifecycle;
+  f.options.resourceLease = lease;
+  let restoreOwner;
+  f.remote.onPatch = async () => {
+    f.remote.selected = 'apple-build';
+    restoreOwner = await displaceActivityRecord(f, lifecycle, lease);
+    return new Response(null, { status: 204 });
+  };
+  try {
+    await assert.rejects(f.invoke(), { code: 'COORDINATION_INVALID' });
+    assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'intent');
+  } finally {
+    await restoreOwner?.();
+    await lease.release();
+  }
+
+  const recovery = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic reconciliation' });
+  try {
+    f.options.resourceLease = recovery;
+    const attached = await f.invoke();
+    assert.equal(attached.exit, 0);
+    assert.equal(attached.report.writeAttempted, false);
+    assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'attached');
+    assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
+  } finally {
+    await recovery.release();
+  }
+});
+
+test('managed attach checks ownership again after saving intent and before PATCH dispatch', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic pre-dispatch loss' });
+  f.options.resourceLifecycle = lifecycle;
+  f.options.resourceLease = lease;
+  const check = lease.assertOwnership;
+  let restoreOwner;
+  lease.assertOwnership = async options => {
+    if (!restoreOwner && (await f.state()).checkpoints.ios['ios-attach']?.state === 'intent' &&
+        f.requests.every(request => request.method === 'GET'))
+      restoreOwner = await displaceActivityRecord(f, lifecycle, lease);
+    return check(options);
+  };
+  try {
+    await assert.rejects(f.invoke(), { code: 'COORDINATION_INVALID' });
+    assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'intent');
+    assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+  } finally {
+    await restoreOwner?.();
+    await lease.release();
+  }
+  const recovery = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic read-only reconciliation' });
+  try {
+    f.options.resourceLease = recovery;
+    const result = await f.invoke();
+    assert.equal(result.exit, 2);
+    assert.equal(result.report.writeAttempted, false);
+    assert.ok(f.requests.every(request => request.method === 'GET'));
+  } finally {
+    await recovery.release();
+  }
+});
+
+test('managed attach retains activity even when a heavy callback catches uncertain source cleanup', async t => {
+  for (const nested of [false, true]) await t.test(nested ? 'existing heavy task' : 'standalone', async t => {
+    const f = await attachFixture(t, { managed: true });
+    const lifecycle = await enableResourceLifecycle(f, 'checks');
+    const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic uncertain source cleanup' });
+    f.options.resourceLifecycle = lifecycle;
+    f.options.resourceLease = lease;
+    const command = f.options.command;
+    f.options.command = async (binary, args, options) => {
+      if (binary === 'git' && args[0] === 'ls-remote') throw cleanupError();
+      return command(binary, args, options);
+    };
+    if (nested) {
+      await assert.rejects(lifecycle.run({ plan: f.plan, operation: 'execute', lease,
+        execute: async resourceSession => {
+          const runner = createRunner({ ...f.options, resourceSession });
+          await assert.rejects(runner.attachBuild(f.plan, { versionId: 'manual-draft' }), { cleanupIncomplete: true });
+          return { state: 'uploaded' };
+        },
+        settle: async ({ error }) => assert.equal(error?.cleanupIncomplete, true),
+      }), { cleanupIncomplete: true });
+      const tasks = Object.values((await readResourceLedger(f.store)).state.tasks);
+      assert.deepEqual(tasks.map(task => task.state), ['active']);
+    } else {
+      await assert.rejects(f.invoke(), { cleanupIncomplete: true });
+    }
+    assert.equal(lease.retained, true);
+    await assertCoordinationOwner(lifecycle.coordinationAnchor, lease.owner, 'activity');
+    await assert.rejects(acquireMaintenance(lifecycle.coordinationAnchor, { operation: 'synthetic maintenance' }),
+      { code: 'COORDINATION_BUSY' });
+    assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+    assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+  });
+});
+
+test('an explicitly borrowed attachment protects activity across its caller boundary', async t => {
+  for (const detached of [false, true]) await t.test(detached ? 'early return' : 'caught error', async t => {
+    const f = await attachFixture(t, { managed: true });
+    const lifecycle = await enableResourceLifecycle(f, 'checks');
+    const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic explicit attachment' });
+    const started = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    const command = f.options.command;
+    f.options.command = async (binary, args, options) => {
+      if (binary === 'git' && args[0] === 'ls-remote') {
+        started.resolve();
+        if (detached) await resume.promise;
+        throw cleanupError();
+      }
+      return command(binary, args, options);
+    };
+    let attachment;
+    try {
+      await lifecycle.admitAttach({ plan: f.plan, lease, execute: async resourceSession => {
+        const runner = createRunner({ ...f.options, resourceSession });
+        attachment = runner.attachBuild(f.plan, { versionId: 'manual-draft' });
+        if (detached) await Promise.race([started.promise, attachment]);
+        else await assert.rejects(attachment, { cleanupIncomplete: true });
+      } });
+      if (detached) await assert.rejects(lease.release(), /borrowed by an active operation/);
+    } finally {
+      resume.resolve();
+      await assert.rejects(attachment, { cleanupIncomplete: true });
+    }
+    await assert.rejects(lease.release(), { cleanupIncomplete: true });
+    await assertCoordinationOwner(lifecycle.coordinationAnchor, lease.owner, 'activity');
+    await assert.rejects(acquireMaintenance(lifecycle.coordinationAnchor, { operation: 'synthetic maintenance' }),
+      { code: 'COORDINATION_BUSY' });
+    assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+    assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+  });
+});
+
+test('a heavy task returning before its attachment finishes keeps the task and lease active', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic detached attachment' });
+  const started = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const command = f.options.command;
+  f.options.command = async (binary, args, options) => {
+    if (binary === 'git' && args[0] === 'ls-remote') {
+      started.resolve();
+      await resume.promise;
+      throw cleanupError();
+    }
+    return command(binary, args, options);
+  };
+  let attachment;
+  let settled = false;
+  try {
+    await assert.rejects(lifecycle.run({ plan: f.plan, operation: 'execute', lease,
+      execute: async resourceSession => {
+        const runner = createRunner({ ...f.options, resourceSession });
+        attachment = runner.attachBuild(f.plan, { versionId: 'manual-draft' });
+        await Promise.race([started.promise, attachment]);
+        return { state: 'uploaded' };
+      },
+      settle: async () => { settled = true; },
+    }), { code: 'RESOURCE_OWNERSHIP', cleanupIncomplete: true });
+    assert.equal(settled, false);
+    assert.equal(lease.retained, true);
+    const tasks = Object.values((await readResourceLedger(f.store)).state.tasks);
+    assert.deepEqual(tasks.map(task => task.state), ['active']);
+    await assert.rejects(acquireMaintenance(lifecycle.coordinationAnchor, { operation: 'synthetic maintenance' }),
+      { code: 'COORDINATION_BUSY' });
+  } finally {
+    resume.resolve();
+    await assert.rejects(attachment, { cleanupIncomplete: true });
+  }
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+  assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+});
+
+test('a heavy task cannot settle after starting attachment but before asynchronous admission', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic early parent return' });
+  let attachment;
+  let settled = false;
+  try {
+    await assert.rejects(lifecycle.run({ plan: f.plan, operation: 'execute', lease,
+      execute: resourceSession => {
+        const runner = createRunner({ ...f.options, resourceSession });
+        attachment = runner.attachBuild(f.plan, { versionId: 'manual-draft' });
+        attachment.catch(() => {});
+        return { state: 'uploaded' };
+      },
+      settle: async () => { settled = true; },
+    }), { code: 'RESOURCE_OWNERSHIP', cleanupIncomplete: true });
+    assert.equal(settled, false);
+    assert.equal(lease.retained, true);
+    const tasks = Object.values((await readResourceLedger(f.store)).state.tasks);
+    assert.deepEqual(tasks.map(task => task.state), ['active']);
+  } finally {
+    await assert.rejects(attachment, /admission|ownership|lease/i);
+  }
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+  assert.deepEqual(f.requests, []);
+});
+
+test('managed attach cannot dispatch PATCH when its parent returns during the final ownership check', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic parent return before dispatch' });
+  const verified = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const check = lease.assertOwnership;
+  lease.assertOwnership = async options => {
+    await check(options);
+    if ((await f.state()).checkpoints.ios['ios-attach']?.state === 'intent') {
+      verified.resolve();
+      await resume.promise;
+    }
+  };
+  let attachment;
+  try {
+    await assert.rejects(lifecycle.run({ plan: f.plan, operation: 'execute', lease,
+      execute: async resourceSession => {
+        const runner = createRunner({ ...f.options, resourceSession });
+        attachment = runner.attachBuild(f.plan, { versionId: 'manual-draft' });
+        await Promise.race([verified.promise, attachment]);
+        return { state: 'uploaded' };
+      },
+    }), { code: 'RESOURCE_OWNERSHIP', cleanupIncomplete: true });
+    assert.equal(lease.retained, true);
+    const tasks = Object.values((await readResourceLedger(f.store)).state.tasks);
+    assert.deepEqual(tasks.map(task => task.state), ['active']);
+  } finally {
+    resume.resolve();
+    await assert.rejects(attachment, { code: 'RESOURCE_ADMISSION' });
+  }
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'intent');
+  assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+});
+
+test('attachment checks local admission at fetch after the Apple token resolves', async t => {
+  const f = await attachFixture(t);
+  const state = await f.state();
+  let active = true;
+  const ctx = {
+    platform: 'ios', plan: f.plan, config: f.config, artifact: state.artifacts.ios,
+    env: f.options.environment, uploadRequested: true, publicationRequested: false,
+    previous: state.checkpoints.ios,
+    assertPublicationSource: async () => {},
+    assertAttachmentCurrent() {
+      if (!active) throw new Error('Synthetic attachment admission expired');
+    },
+    now() {
+      // Revoke after the token callback begins, before the awaiting transport resumes.
+      if (state.checkpoints.ios['ios-attach']?.state === 'intent') queueMicrotask(() => { active = false; });
+      return Date.now();
+    },
+    async checkpoint(name, evidence) {
+      state.checkpoints.ios[name] = evidence;
+      await saveState(releasePath(f.store, f.plan.id), state);
+    },
+  };
+  await assert.rejects(attachStoreBuild(ctx, { versionId: 'manual-draft' }), /attachment admission expired/);
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'intent');
+  assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+});
+
+function pauseAttachmentCheckpoint(t, f, checkpoint) {
+  const staged = Promise.withResolvers();
+  const publish = Promise.withResolvers();
+  const events = join(releasePath(f.store, f.plan.id), 'events');
+  const open = fs.open;
+  const mocked = t.mock.method(fs, 'open', async (file, ...args) => {
+    const handle = await open(file, ...args);
+    if (typeof file === 'string' && file.startsWith(events + '/') && file.endsWith('.tmp')) {
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        await sync();
+        const event = JSON.parse(await readFile(file, 'utf8'));
+        if (event.state.checkpoints.ios['ios-attach']?.state === checkpoint) {
+          staged.resolve();
+          await publish.promise;
+        }
+      };
+    }
+    return handle;
+  });
+  syncBuiltinESMExports();
+  return { events, staged: staged.promise, resume: publish.resolve,
+    restore() { mocked.mock.restore(); syncBuiltinESMExports(); } };
+}
+
+test('managed attachment cannot commit a staged checkpoint after its parent returns', async t => {
+  for (const checkpoint of ['intent', 'attached']) await t.test(checkpoint, async t => {
+    const f = await attachFixture(t, { managed: true });
+    const lifecycle = await enableResourceLifecycle(f, 'checks');
+    const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic staged attachment' });
+    const checkpointPause = pauseAttachmentCheckpoint(t, f, checkpoint);
+    let attachment;
+    try {
+      await assert.rejects(lifecycle.run({ plan: f.plan, operation: 'execute', lease,
+        execute: async resourceSession => {
+          const runner = createRunner({ ...f.options, resourceSession });
+          attachment = runner.attachBuild(f.plan, { versionId: 'manual-draft' });
+          await Promise.race([checkpointPause.staged, attachment]);
+          return { state: 'uploaded' };
+        },
+      }), { code: 'RESOURCE_OWNERSHIP', cleanupIncomplete: true });
+      assert.equal(lease.retained, true);
+      const tasks = Object.values((await readResourceLedger(f.store)).state.tasks);
+      assert.deepEqual(tasks.map(task => task.state), ['active']);
+    } finally {
+      checkpointPause.resume();
+      try { await assert.rejects(attachment, { code: 'RESOURCE_ADMISSION' }); }
+      finally { checkpointPause.restore(); }
+    }
+    const saved = (await f.state()).checkpoints.ios['ios-attach'];
+    assert.equal(saved?.state, checkpoint === 'intent' ? undefined : 'intent');
+    assert.equal(f.requests.filter(request => request.method === 'PATCH').length, checkpoint === 'intent' ? 0 : 1);
+    assert.ok((await readdir(checkpointPause.events)).every(file => !file.endsWith('.tmp')));
+  });
+});
+
+test('managed attachment checks the captured owner and policy after staging intent', async t => {
+  for (const change of ['owner record', 'active policy']) await t.test(change, async t => {
+    const f = await attachFixture(t, { managed: true });
+    const lifecycle = await enableResourceLifecycle(f, 'checks');
+    const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic staged ownership change' });
+    f.options.resourceLifecycle = lifecycle;
+    f.options.resourceLease = lease;
+    const checkpointPause = pauseAttachmentCheckpoint(t, f, 'intent');
+    const attachment = f.invoke();
+    let restore;
+    try {
+      await Promise.race([checkpointPause.staged, attachment]);
+      const ownerChanged = change === 'owner record';
+      if (ownerChanged) restore = await displaceActivityRecord(f, lifecycle, lease, { replace: true });
+      else {
+        const path = join(f.store, 'resources', 'feature.json');
+        const bytes = await readFile(path, 'utf8');
+        await writeFile(path, JSON.stringify({ ...JSON.parse(bytes), policy: 'f'.repeat(64) }));
+        restore = () => writeFile(path, bytes);
+      }
+      checkpointPause.resume();
+      await assert.rejects(attachment, { code: ownerChanged ? 'COORDINATION_INVALID' : 'RESOURCE_COMPATIBILITY' });
+      assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+      assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+      assert.ok((await readdir(checkpointPause.events)).every(file => !file.endsWith('.tmp')));
+    } finally {
+      checkpointPause.resume();
+      checkpointPause.restore();
+      await restore?.();
+      await lease.release();
+    }
+  });
+});
+
+test('cancelling managed attach before intent commit leaves no pending attachment', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic attach cancellation' });
+  f.options.resourceLifecycle = lifecycle;
+  f.options.resourceLease = lease;
+  const checkpointPause = pauseAttachmentCheckpoint(t, f, 'intent');
+  const controller = new AbortController();
+  const attachment = f.invoke([], controller.signal);
+  try {
+    await Promise.race([checkpointPause.staged, attachment]);
+    controller.abort();
+    checkpointPause.resume();
+    assert.equal((await attachment).exit, 130);
+    assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+    assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+    assert.ok((await readdir(checkpointPause.events)).every(file => !file.endsWith('.tmp')));
+  } finally {
+    checkpointPause.resume();
+    checkpointPause.restore();
+    await lease.release();
+  }
+});
+
+test('cancelling the lifecycle signal alone stops attachment commit and transport', async t => {
+  for (const dispatch of [false, true]) await t.test(dispatch ? 'transport' : 'intent', async t => {
+    const f = await attachFixture(t, { managed: true });
+    const controller = new AbortController();
+    const lifecycle = await enableResourceLifecycle(f, 'checks', 8, controller.signal);
+    const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic lifecycle cancellation' });
+    const pause = dispatch ? null : pauseAttachmentCheckpoint(t, f, 'intent');
+    const verified = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    if (dispatch) {
+      const check = lease.assertOwnership;
+      lease.assertOwnership = async options => {
+        await check(options);
+        if ((await f.state()).checkpoints.ios['ios-attach']?.state === 'intent') {
+          verified.resolve();
+          await resume.promise;
+        }
+      };
+    }
+    const attachment = lifecycle.run({ plan: f.plan, operation: 'execute', lease,
+      execute: resourceSession => createRunner({ ...f.options, resourceSession })
+        .attachBuild(f.plan, { versionId: 'manual-draft' }),
+    });
+    try {
+      await Promise.race([pause?.staged ?? verified.promise, attachment]);
+      controller.abort();
+      pause?.resume();
+      resume.resolve();
+      await assert.rejects(attachment, { name: 'AbortError' });
+      assert.equal((await f.state()).checkpoints.ios['ios-attach']?.state, dispatch ? 'intent' : undefined);
+      assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+    } finally {
+      pause?.resume();
+      resume.resolve();
+      pause?.restore();
+      await lease.release();
+    }
+  });
+});
+
+test('after the parent returns attachment starts no further source or content command, journal append or PATCH', async t => {
+  for (const phase of ['ls-remote', 'status', 'prepared content']) await t.test(phase, async t => {
+    const f = await attachFixture(t, { managed: true, prepared: phase === 'prepared content' });
+    const step = phase === 'ls-remote' ? 'ls-remote' : 'status';
+    const lifecycle = await enableResourceLifecycle(f, 'checks');
+    const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic deferred source verification' });
+    const events = join(releasePath(f.store, f.plan.id), 'events');
+    const before = (await readdir(events)).sort();
+    const checked = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    const command = f.options.command;
+    const commands = [];
+    f.options.command = async (binary, args, options) => {
+      commands.push(args[0]);
+      const result = await command(binary, args, options);
+      if (binary === 'git' && args[0] === step && (step !== 'status' || options.cwd.endsWith('/build-ios'))) {
+        checked.resolve();
+        await resume.promise;
+      }
+      return result;
+    };
+    let attachment;
+    let commandCount;
+    try {
+      await assert.rejects(lifecycle.run({ plan: f.plan, operation: 'execute', lease,
+        execute: async resourceSession => {
+          const runner = createRunner({ ...f.options, resourceSession });
+          attachment = runner.attachBuild(f.plan, { versionId: 'manual-draft' });
+          await Promise.race([checked.promise, attachment]);
+          commandCount = commands.length;
+          return { state: 'uploaded' };
+        },
+      }), { code: 'RESOURCE_OWNERSHIP', cleanupIncomplete: true });
+    } finally {
+      resume.resolve();
+      await assert.rejects(attachment, { code: 'RESOURCE_ADMISSION' });
+    }
+    assert.equal(commands.length, commandCount);
+    assert.equal(lease.retained, true);
+    assert.deepEqual(Object.values((await readResourceLedger(f.store)).state.tasks).map(task => task.state), ['active']);
+    assert.deepEqual((await readdir(events)).sort(), before);
+    assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+  });
+});
+
+test('managed attachment keeps confirmation but rejects success when its parent returns during lock cleanup', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic attach teardown' });
+  const releasing = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const target = digest({ appId: 'example.synthetic', platform: 'ios', destination: 'app-store' });
+  const path = join(f.store, 'locks', `target-${target}.lock`);
+  const unlink = fs.unlink;
+  const mocked = t.mock.method(fs, 'unlink', async file => {
+    if (file === path) {
+      releasing.resolve();
+      await resume.promise;
+    }
+    return unlink(file);
+  });
+  syncBuiltinESMExports();
+  let attachment;
+  try {
+    await assert.rejects(lifecycle.run({ plan: f.plan, operation: 'execute', lease,
+      execute: async resourceSession => {
+        const runner = createRunner({ ...f.options, resourceSession });
+        attachment = runner.attachBuild(f.plan, { versionId: 'manual-draft' });
+        await Promise.race([releasing.promise, attachment]);
+        return { state: 'uploaded' };
+      },
+    }), { code: 'RESOURCE_OWNERSHIP', cleanupIncomplete: true });
+    assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'attached');
+    assert.equal(lease.retained, true);
+  } finally {
+    resume.resolve();
+    try { await assert.rejects(attachment, { code: 'RESOURCE_ADMISSION' }); }
+    finally { mocked.mock.restore(); syncBuiltinESMExports(); }
+  }
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'].state, 'attached');
   assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
 });
 

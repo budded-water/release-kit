@@ -76,12 +76,13 @@ replace a different selected build.
 
 The first write requires the existing production source gate and, when configured,
 prepared Apple content verification. Before a write, version inventory, the
-draft snapshot and the relationship read must agree. The runner rechecks the build and current source before saving
-`ios-attach` intent and making one Apple build relationship PATCH.
+draft snapshot and the relationship read must agree. The runner rechecks the
+build and current source, records the source proof and `ios-attach` intent in the
+same event, then makes one Apple build relationship PATCH.
 Exit `0` means a separate read confirmed the exact attachment, including when the
 same build was already selected. Exit `2` means the operation was refused or the
 attachment cannot be confirmed. Cancellation through the CLI returns `130` and
-keeps any saved intent. `writeAttempted` describes whether that invocation sent a
+keeps any intent already committed. `writeAttempted` describes whether that invocation sent a
 write attempt, while the provider read establishes the selected build. Use
 `store-status` or `store-preflight` for a fresh read after attachment.
 
@@ -98,11 +99,13 @@ when an observation reports a terminal outcome. A confirmed attachment also
 requires a fresh matching terminal observation before a terminal-state transfer. `attach` itself changes only the build linkage. It does not
 schedule work, run Fastlane, upload, change release settings or submit for review.
 
-The runner method is `runner.attachBuild(plan, { versionId })`. It uses the same
-release and target locks and existing state admission. It does not initiate
-resource lifecycle execution or reclamation. An activated state root still needs
-the live admission required by that root. A managed consumer must integrate the
-command with its existing admission rules before adoption.
+The runner method is `runner.attachBuild(plan, { versionId })`. An already
+admitted resource task delegates attachment through this API. The CLI is a
+dedicated local invocation. Both use the same release and target locks and
+existing state admission. For an activated state root, the managed entry provides its scoped resource
+policy and existing activity lease from the reviewed attach-aware coordinator. Attachment verifies live admission for the
+exact saved release. It leaves lifecycle tasks, caches and native sessions
+untouched.
 
 `ios-attach` is an additive checkpoint in the existing schema 1 journal. Upload
 journals without that checkpoint can attach when their exact confirmed upload

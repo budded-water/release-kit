@@ -53,9 +53,15 @@ function validatePolicy(policy, adapter) {
     throw resourceError('RESOURCE_POLICY', 'Cache declarations must have distinct nonoverlapping leaves');
 }
 
-export async function assertResourceAdmission({ store, plan, session }) {
-  if (!(await present(featurePath(store)))) return;
-  if (!sessions.has(session) || session.store !== store || session.plan.id !== plan.id || session.plan.source !== plan.source)
+export async function hasResourceActivation(store) {
+  return Boolean(await present(featurePath(store)));
+}
+
+export async function assertResourceAdmission({ store, plan, session, operation }) {
+  const activated = await hasResourceActivation(store);
+  if (!activated && !session) return;
+  if (!activated || !sessions.has(session) || session.store !== store || session.plan.id !== plan.id ||
+      session.plan.source !== plan.source || (session.operation === 'attach' && operation !== 'attach'))
     throw resourceError('RESOURCE_ADMISSION', 'Activated resource root requires a live lifecycle admission');
   await session.assertActive();
 }
@@ -333,6 +339,64 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
     return { taskId: task.id, state: task.state, provenance: 'operator-attested' };
   }
 
+  async function assertAttachActivity(lease, owner) {
+    signal?.throwIfAborted();
+    if (owner?.kind !== 'activity' || typeof lease?.assertOwnership !== 'function' ||
+        typeof lease.withOwnership !== 'function' || lease.retained || lease.owner !== owner)
+      throw resourceError('RESOURCE_ADMISSION', 'Managed attachment requires a current activity lease from the attach-aware coordinator');
+    await feature();
+    await lease.assertOwnership({ expectedOwner: owner, expectedAnchor: anchor });
+  }
+
+  async function withAttachSession(plan, lease, owner, execute, parent) {
+    const assertCurrent = () => {
+      signal?.throwIfAborted();
+      if (!sessions.has(admitted) || (parent && !sessions.has(parent)) || lease.retained || lease.owner !== owner)
+        throw resourceError('RESOURCE_ADMISSION', 'Managed attachment admission has expired');
+    };
+    const borrow = callback => lease.withOwnership({ expectedOwner: owner, expectedAnchor: anchor }, async () => {
+      try { return await callback(); }
+      catch (error) {
+        if (error.cleanupIncomplete) lease.retain();
+        throw error;
+      }
+    });
+    const admitted = Object.freeze({
+      store, plan: Object.freeze({ id: plan.id, source: plan.source }), operation: 'attach',
+      assertCurrent,
+      runAttachment: callback => borrow(() => {
+        assertCurrent();
+        return callback(admitted);
+      }),
+      async assertActive() {
+        assertCurrent();
+        await assertAttachActivity(lease, owner);
+        assertCurrent();
+      },
+    });
+    return borrow(async () => {
+      sessions.add(admitted);
+      try {
+        await admitted.assertActive();
+        return await execute(admitted);
+      } finally {
+        sessions.delete(admitted);
+      }
+    });
+  }
+
+  async function admitAttach({ plan, lease, execute } = {}) {
+    if (typeof execute !== 'function' || !/^release-[a-f0-9]{24}$/.test(plan?.id ?? '') ||
+        !/^[a-f0-9]{40}$/.test(plan?.source ?? ''))
+      throw resourceError('RESOURCE_ADMISSION', 'Managed attachment requires a bound release plan');
+    const owner = lease?.owner;
+    await assertAttachActivity(lease, owner);
+    const { state } = await readResourceLedger(store);
+    if (Object.values(state.tasks).some(task => task.state !== 'settled'))
+      throw resourceError('RESOURCE_OWNERSHIP', 'Prior resource task requires explicit settlement reconciliation');
+    return withAttachSession(plan, lease, owner, execute);
+  }
+
   async function run({ plan, operation, lease: suppliedLease, pendingRequest, execute, settle = async () => {} } = {}) {
     signal?.throwIfAborted();
     if (!['validate', 'execute', 'content'].includes(operation) || typeof execute !== 'function' ||
@@ -381,12 +445,27 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
         state: 'active', owner: lease.owner.token, phase: operation, reservedBytes: policy.phaseBytes[operation] };
       await write(ledger, lease);
       await lease.transition('activity');
+      let attachAdmissionOpen = true;
+      let attachmentsInProgress = 0;
       session = {
         store, plan: Object.freeze({ id: plan.id, source: plan.source }), taskId,
         async assertActive() {
           signal?.throwIfAborted();
-          if (!sessions.has(session)) throw resourceError('RESOURCE_ADMISSION', 'Resource task admission has expired');
+          if (!sessions.has(session) || lease.retained)
+            throw resourceError('RESOURCE_ADMISSION', 'Resource task admission is no longer active');
           await assertCoordinationOwner(anchor, lease.owner, 'activity');
+        },
+        async admitAttach(execute) {
+          if (!attachAdmissionOpen)
+            throw resourceError('RESOURCE_ADMISSION', 'Resource task has stopped admitting attachments');
+          attachmentsInProgress++;
+          try {
+            const owner = lease.owner;
+            await session.assertActive();
+            return await withAttachSession(session.plan, lease, owner, execute, session);
+          } finally {
+            attachmentsInProgress--;
+          }
         },
         async checkCapacity(phase) {
           await session.assertActive();
@@ -483,8 +562,21 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
       };
       Object.freeze(session);
       sessions.add(session);
+      const recordRetainedOwnership = () => {
+        if (!lease.retained) return;
+        safeToRelease = false;
+        primaryError ??= Object.assign(resourceError('RESOURCE_OWNERSHIP',
+          'Activity ownership is retained for explicit cleanup reconciliation'), { cleanupIncomplete: true });
+      };
       try { result = await execute(session); }
       catch (error) { primaryError = error; }
+      attachAdmissionOpen = false;
+      if (attachmentsInProgress) {
+        lease.retain();
+        throw Object.assign(resourceError('RESOURCE_OWNERSHIP',
+          'Resource task returned while an attachment was still active'), { cleanupIncomplete: true, cause: primaryError });
+      }
+      recordRetainedOwnership();
       if (signal?.aborted) primaryError ??= signal.reason;
       const executionSucceeded = !primaryError && result?.state !== 'unknown' &&
         (result?.exitCode === undefined || result.exitCode === 0) &&
@@ -509,6 +601,7 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
       } catch (error) { teardownError ??= error; safeToRelease = false; }
       clearTimeout(cleanupTimer);
       sessions.delete(session);
+      recordRetainedOwnership();
       if (primaryError?.cleanupIncomplete) safeToRelease = false;
       if (safeToRelease) {
         ledger.state.tasks[taskId].state = 'settled';
@@ -559,6 +652,6 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
       if (!safeToRelease) lease.retain();
     }
   }
-  return Object.freeze({ activate, run, reclaim, reconcileTask, policyIdentity: identity,
+  return Object.freeze({ activate, run, admitAttach, reclaim, reconcileTask, policyIdentity: identity,
     coordinationAnchor: anchor, stateDirectory: store });
 }

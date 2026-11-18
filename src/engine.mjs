@@ -25,7 +25,7 @@ import { requireProject } from './project.mjs';
 import { createCleanupGuard } from './cleanup.mjs';
 import { runCommand } from './command.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { assertResourceAdmission } from './resource-lifecycle.mjs';
+import { assertResourceAdmission, hasResourceActivation } from './resource-lifecycle.mjs';
 
 const now = () => new Date().toISOString();
 function assertNativeWorkspace(directory) {
@@ -72,7 +72,7 @@ export function createRunner({
   repo,
   store,
   config,
-  command = runCommand,
+  command: executeCommand = runCommand,
   adapters,
   project,
   environment = process.env,
@@ -83,8 +83,8 @@ export function createRunner({
 }) {
   const resourceContext = new AsyncLocalStorage();
   let resourceMaintenance = null;
-  const cleanup = createCleanupGuard(store, command);
-  command = cleanup.command;
+  const cleanup = createCleanupGuard(store, executeCommand);
+  const command = cleanup.command;
   const acquireLock = async (path) => {
     await cleanup.assertSafe();
     const unlock = await acquireStateLock(path);
@@ -155,19 +155,20 @@ export function createRunner({
       throw error;
     }
   }
-  async function verifyProductionSource(state, directory, platform, root, operation) {
+  async function verifyProductionSource(state, directory, platform, root, operation,
+    { persist = true, sourceCommand = command } = {}) {
     await cleanup.assertSafe();
     if (!['ios', 'android'].includes(platform)) return;
     let verification;
     try {
-      verification = await assertProductionSource({ repo, root, plan: state.plan, command });
+      verification = await assertProductionSource({ repo, root, plan: state.plan, command: sourceCommand });
     } catch (error) {
       error.releaseSourceRejected = true;
       throw error;
     }
     state.sourceVerifications ??= {};
     state.sourceVerifications[platform] = { ...verification, operation };
-    await saveState(directory, state);
+    if (persist) await saveState(directory, state);
   }
   const context = (state, directory, platform, root) => ({
     root,
@@ -186,10 +187,10 @@ export function createRunner({
     assertPublicationSource: () =>
       verifyProductionSource(state, directory, platform, root, 'publication'),
     previous: (state.checkpoints[platform] ??= {}),
-    checkpoint: async (name, data) => {
+    checkpoint: async (name, data, commitOptions) => {
       state.checkpoints[platform] ??= {};
       state.checkpoints[platform][name] = data;
-      await saveState(directory, state);
+      await saveState(directory, state, commitOptions);
     },
   });
   const outputDirectory = (state, directory, platform) =>
@@ -773,8 +774,8 @@ export function createRunner({
     resourceMaintenance = completed.maintenance;
     return completed.result;
   }
-  async function admittedRelease(plan, task, { existingOnly = false } = {}) {
-    await assertResourceAdmission({ store, plan, session: resourceContext.getStore() });
+  async function admittedRelease(plan, task, { existingOnly = false, operation } = {}) {
+    await assertResourceAdmission({ store, plan, session: resourceContext.getStore(), operation });
     await cleanup.assertSafe();
     const directory = releasePath(store, plan.id);
     if (!existingOnly) await privateDirectory(directory);
@@ -872,13 +873,53 @@ export function createRunner({
       const unlock = await publicationOwnership(state, directory, 'ios', { existingOnly: true });
       try {
         const root = checkoutDirectory(state, directory, 'ios');
-        const report = await attachStoreBuild(context(state, directory, 'ios', root), { versionId });
+        const ctx = context(state, directory, 'ios', root);
+        const session = resourceContext.getStore();
+        const assertAttachmentCurrent = session?.assertCurrent;
+        const assertAttachmentAdmission = () =>
+          assertResourceAdmission({ store, plan, session, operation: 'attach' });
+        const attachmentCommand = (binary, args, options) => cleanup.run(() => {
+          signal?.throwIfAborted();
+          assertAttachmentCurrent?.();
+          return executeCommand(binary, args, { ...options, signal, diagnostics: false });
+        });
+        const report = await attachStoreBuild({
+          ...ctx,
+          command: attachmentCommand,
+          assertAttachmentAdmission,
+          assertAttachmentCurrent,
+          assertPublicationSource: () => verifyProductionSource(state, directory, 'ios', root, 'publication',
+            { persist: false, sourceCommand: attachmentCommand }),
+          checkpoint: async (name, evidence, { signal: intentSignal } = {}) => {
+            await assertAttachmentAdmission();
+            await ctx.checkpoint(name, evidence, {
+              authorizeCommit: assertAttachmentAdmission,
+              beforeCommit() {
+                intentSignal?.throwIfAborted();
+                assertAttachmentCurrent?.();
+              },
+            });
+          },
+        }, { versionId });
         return { operation: 'attach', releaseId: plan.id, ...report };
       } finally {
         await unlock();
       }
     };
-    return resourceContext.run(resourceSession, () => admittedRelease(plan, task, { existingOnly: true }));
+    const execute = async session => {
+      const report = await resourceContext.run(session, () =>
+        admittedRelease(plan, task, { existingOnly: true, operation: 'attach' }));
+      session?.assertCurrent?.();
+      return report;
+    };
+    if (resourceSession?.admitAttach) return resourceSession.admitAttach(execute);
+    if (resourceSession?.runAttachment) return resourceSession.runAttachment(execute);
+    if (resourceSession) return execute(resourceSession);
+    if (resourceLease && !resourceLifecycle)
+      throw new Error('Managed attachment with an activity lease requires its lifecycle policy');
+    if (resourceLifecycle && (resourceLease || await hasResourceActivation(store)))
+      return resourceLifecycle.admitAttach({ plan, lease: resourceLease, execute });
+    return execute();
   }
   async function validate(plan, { ui = false } = {}) {
     if (typeof ui !== 'boolean') throw new Error('UI validation selection must be boolean');

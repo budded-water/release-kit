@@ -138,7 +138,7 @@ function ownedPlayRelease(ctx) {
   return previous(ctx, 'android-upload') || previous(ctx, 'android-commit');
 }
 
-async function save(ctx, name, value) {
+async function save(ctx, name, value, checkpointOptions) {
   // Confirmed results may still be journaled during cancellation. Never start a
   // new operation intent after the operator has stopped the release.
   if (value.state === 'intent') {
@@ -147,7 +147,7 @@ async function save(ctx, name, value) {
     ctx.signal?.throwIfAborted();
   }
   const data = { ...value, identity: identity(ctx), recordedAt: now() };
-  await ctx.checkpoint(name, data);
+  await ctx.checkpoint(name, data, checkpointOptions);
   ctx.previous ??= {};
   ctx.previous[name] = data;
   return data;
@@ -163,7 +163,7 @@ function result(ctx, state, values = {}) {
   };
 }
 
-async function request(ctx, url, token, options = {}) {
+async function request(ctx, url, token, options = {}, { authorize, beforeFetch } = {}) {
   ctx.signal?.throwIfAborted();
   const origin = new URL(url).origin;
   if (![APPLE, GOOGLE, IAM, new URL(OAUTH).origin].includes(origin))
@@ -171,8 +171,10 @@ async function request(ctx, url, token, options = {}) {
   const bearer = typeof token === 'function' ? await token() : token;
   const headers = { ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}), ...options.headers };
   let response;
+  if (authorize) await authorize();
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 60000);
   const signal = ctx.signal ? AbortSignal.any([ctx.signal, timeout]) : timeout;
+  beforeFetch?.();
   try {
     response = await (ctx.fetch ?? fetch)(url, {
       ...options,
@@ -1468,6 +1470,7 @@ export async function attachStoreBuild(ctx, { versionId } = {}) {
   const finish = async (writeAttempted) => {
     ctx.signal?.throwIfAborted();
     if (prior?.state !== 'attached') await save(ctx, 'ios-attach', { state: 'attached', versionId, buildId });
+    ctx.assertAttachmentCurrent?.();
     return result(ctx, 'attached', { versionId, buildId, writeAttempted, releaseType: 'MANUAL' });
   };
   const unconfirmed = writeAttempted => result(ctx, 'unknown', { versionId, buildId, writeAttempted,
@@ -1487,13 +1490,22 @@ export async function attachStoreBuild(ctx, { versionId } = {}) {
   const freshBuild = (await request(ctx, `${APPLE}/v1/builds/${segment(buildId)}`, token))?.data;
   if (!validBuild(freshBuild)) throw new StoreError('The uploaded build is no longer eligible for attachment.');
   if (await readBeforeWrite()) return finish(false);
-  await save(ctx, 'ios-attach', { state: 'intent', versionId, buildId });
+  await save(ctx, 'ios-attach', { state: 'intent', versionId, buildId }, { signal: ctx.signal });
+  let dispatched = false;
   try {
     await request(ctx, relationship, token, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ data: { type: 'builds', id: buildId } }),
+    }, {
+      authorize: ctx.assertAttachmentAdmission,
+      beforeFetch() {
+        ctx.signal.throwIfAborted();
+        ctx.assertAttachmentCurrent?.();
+        dispatched = true;
+      },
     });
-  } catch {
+  } catch (error) {
+    if (!dispatched) throw error;
     // A lost response may have committed. Read once, never repeat the PATCH.
     ctx.signal?.throwIfAborted();
   }
