@@ -14,6 +14,7 @@ import { loadStoreContent } from '../src/store-content.mjs';
 import { createRequest, dispatchRequest, runRequest, readRequestStatus, inspectDispatchRequests } from '../src/executor.mjs';
 import { workerMain } from '../src/worker.mjs';
 import { createResourceLifecycle } from '../src/resource-lifecycle.mjs';
+import { readResourceLedger } from '../src/resource-ledger.mjs';
 import { inspectResourceReferences } from '../src/resource-references.mjs';
 import { acquireActivity, acquireMaintenance } from '../src/coordination.mjs';
 import { executionHandlers } from '../src/execution.mjs';
@@ -787,6 +788,52 @@ test('attach honors both locks and only uses an existing managed admission', asy
   } });
   assert.equal(operation.result.state, 'attached');
   assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
+});
+
+test('managed attach borrows its installed activity without starting a resource task', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  f.options.resourceLifecycle = lifecycle;
+  await assert.rejects(f.invoke(), { code: 'RESOURCE_ADMISSION' });
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic managed attach' });
+  const ledger = await readResourceLedger(f.store);
+  const calls = [...f.calls];
+  let session;
+  try {
+    await lifecycle.admitAttach({ plan: f.plan, lease, execute: async admitted => {
+      session = admitted;
+      const runner = createRunner({ ...f.options, resourceSession: admitted });
+      await assert.rejects(runner.validate(f.plan), { code: 'RESOURCE_ADMISSION' });
+    } });
+    await assert.rejects(createRunner({ ...f.options, resourceSession: session })
+      .attachBuild(f.plan, { versionId: 'manual-draft' }), { code: 'RESOURCE_ADMISSION' });
+    assert.deepEqual(f.requests, []);
+
+    f.options.resourceLease = lease;
+    const attached = await f.invoke();
+    assert.equal(attached.exit, 0);
+    assert.equal(attached.report.state, 'attached');
+    assert.equal(attached.report.writeAttempted, true);
+    assert.equal(lease.owner.kind, 'activity');
+    assert.deepEqual(await readResourceLedger(f.store), ledger);
+    assert.deepEqual(f.calls, calls);
+  } finally {
+    await lease.release();
+  }
+  assert.equal(f.requests.filter(request => request.method === 'PATCH').length, 1);
+});
+
+test('managed attach refuses intent when activity admission ends during provider reads', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic interrupted activity' });
+  f.options.resourceLifecycle = lifecycle;
+  f.options.resourceLease = lease;
+  f.remote.onFreshBuild = () => lease.release();
+  await assert.rejects(f.invoke(), { code: 'COORDINATION_INVALID' });
+
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+  assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
 });
 
 test('attachment preserves the existing confirmed unsubmitted-upload handoff boundary', async t => {

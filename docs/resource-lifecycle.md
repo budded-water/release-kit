@@ -38,6 +38,12 @@ API `activate({lease})` requires current in-process maintenance ownership and se
 dispatch/cleanup evidence. Unknown metadata or partial activation requires explicit
 reconciliation, not directory replacement.
 
+A managed iOS build attachment borrows an existing activity lease. The
+activated policy and settled resource journal must match the installed state
+root. The admission is scoped to the saved release and the attachment command
+for the duration of the callback. It preserves the lease and resource journal
+without opening a heavy lifecycle task. See [bounded attachment](ios-upload.md#attach-the-confirmed-build-to-a-manual-draft).
+
 ## Trusted adapter and resource boundaries
 
 The project's `resourceAdapter` factory receives explicit policy, supervised command

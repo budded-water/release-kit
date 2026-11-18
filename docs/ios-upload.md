@@ -100,9 +100,10 @@ schedule work, run Fastlane, upload, change release settings or submit for revie
 
 The runner method is `runner.attachBuild(plan, { versionId })`. It uses the same
 release and target locks and existing state admission. It does not initiate
-resource lifecycle execution or reclamation. An activated state root still needs
-the live admission required by that root. A managed consumer must integrate the
-command with its existing admission rules before adoption.
+resource lifecycle execution or reclamation. For an activated state root, the managed entry provides its scoped resource
+policy and existing activity lease. Attachment verifies live admission for the
+exact saved release. It leaves lifecycle tasks, caches and native sessions
+untouched.
 
 `ios-attach` is an additive checkpoint in the existing schema 1 journal. Upload
 journals without that checkpoint can attach when their exact confirmed upload

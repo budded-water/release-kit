@@ -111,3 +111,9 @@ upload-only iOS release to an explicit existing manual draft before review.
 - **WHEN** the operator uses ordinary resume, a read-only launcher or dispatch
 - **THEN** it cannot initiate the attachment operation
 - **AND** attachment uses the existing upload checkpoint and locks without creating another release or advancing its approval scope
+
+#### Scenario: Managed attachment admission
+- **WHEN** the installed local entry requests attachment from an activated state root using its active activity lease
+- **THEN** the runner verifies the installed policy and settled lifecycle state before admitting the exact saved release for attachment
+- **AND** the command preserves the activity lease and resource journal without scheduling reclamation, building or using other execution capabilities
+- **AND** missing, expired or incompatible admission blocks provider work

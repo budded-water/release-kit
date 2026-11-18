@@ -773,8 +773,8 @@ export function createRunner({
     resourceMaintenance = completed.maintenance;
     return completed.result;
   }
-  async function admittedRelease(plan, task, { existingOnly = false } = {}) {
-    await assertResourceAdmission({ store, plan, session: resourceContext.getStore() });
+  async function admittedRelease(plan, task, { existingOnly = false, operation } = {}) {
+    await assertResourceAdmission({ store, plan, session: resourceContext.getStore(), operation });
     await cleanup.assertSafe();
     const directory = releasePath(store, plan.id);
     if (!existingOnly) await privateDirectory(directory);
@@ -872,13 +872,24 @@ export function createRunner({
       const unlock = await publicationOwnership(state, directory, 'ios', { existingOnly: true });
       try {
         const root = checkoutDirectory(state, directory, 'ios');
-        const report = await attachStoreBuild(context(state, directory, 'ios', root), { versionId });
+        const ctx = context(state, directory, 'ios', root);
+        const session = resourceContext.getStore();
+        const report = await attachStoreBuild({
+          ...ctx,
+          checkpoint: async (name, evidence) => {
+            await assertResourceAdmission({ store, plan, session, operation: 'attach' });
+            await ctx.checkpoint(name, evidence);
+          },
+        }, { versionId });
         return { operation: 'attach', releaseId: plan.id, ...report };
       } finally {
         await unlock();
       }
     };
-    return resourceContext.run(resourceSession, () => admittedRelease(plan, task, { existingOnly: true }));
+    const execute = session => resourceContext.run(session, () =>
+      admittedRelease(plan, task, { existingOnly: true, operation: 'attach' }));
+    if (resourceSession || !resourceLifecycle) return execute(resourceSession);
+    return resourceLifecycle.admitAttach({ plan, lease: resourceLease, execute });
   }
   async function validate(plan, { ui = false } = {}) {
     if (typeof ui !== 'boolean') throw new Error('UI validation selection must be boolean');
