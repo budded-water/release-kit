@@ -1047,6 +1047,47 @@ test('managed attach retains activity even when a heavy callback catches uncerta
   });
 });
 
+test('a heavy task returning before its attachment finishes keeps the task and lease active', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic detached attachment' });
+  const started = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const command = f.options.command;
+  f.options.command = async (binary, args, options) => {
+    if (binary === 'git' && args[0] === 'ls-remote') {
+      started.resolve();
+      await resume.promise;
+      throw cleanupError();
+    }
+    return command(binary, args, options);
+  };
+  let attachment;
+  let settled = false;
+  try {
+    await assert.rejects(lifecycle.run({ plan: f.plan, operation: 'execute', lease,
+      execute: async resourceSession => {
+        const runner = createRunner({ ...f.options, resourceSession });
+        attachment = runner.attachBuild(f.plan, { versionId: 'manual-draft' });
+        await Promise.race([started.promise, attachment]);
+        return { state: 'uploaded' };
+      },
+      settle: async () => { settled = true; },
+    }), { code: 'RESOURCE_OWNERSHIP', cleanupIncomplete: true });
+    assert.equal(settled, false);
+    assert.equal(lease.retained, true);
+    const tasks = Object.values((await readResourceLedger(f.store)).state.tasks);
+    assert.deepEqual(tasks.map(task => task.state), ['active']);
+    await assert.rejects(acquireMaintenance(lifecycle.coordinationAnchor, { operation: 'synthetic maintenance' }),
+      { code: 'COORDINATION_BUSY' });
+  } finally {
+    resume.resolve();
+    await assert.rejects(attachment, { cleanupIncomplete: true });
+  }
+  assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+  assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+});
+
 test('attachment preserves the existing confirmed unsubmitted-upload handoff boundary', async t => {
   const variants = ['confirmed', 'cleared', 'pending', 'pending-terminal', 'replacement-draft',
     'stale-selection', 'stale-review-state', 'omitted-draft', 'deleted-draft', 'confirmed-terminal', 'stale-terminal'];

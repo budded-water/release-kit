@@ -427,6 +427,8 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
         state: 'active', owner: lease.owner.token, phase: operation, reservedBytes: policy.phaseBytes[operation] };
       await write(ledger, lease);
       await lease.transition('activity');
+      let attachAdmissionOpen = true;
+      let attachmentsInProgress = 0;
       session = {
         store, plan: Object.freeze({ id: plan.id, source: plan.source }), taskId,
         async assertActive() {
@@ -436,9 +438,16 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
           await assertCoordinationOwner(anchor, lease.owner, 'activity');
         },
         async admitAttach(execute) {
-          const owner = lease.owner;
-          await session.assertActive();
-          return withAttachSession(session.plan, lease, owner, execute, session);
+          if (!attachAdmissionOpen)
+            throw resourceError('RESOURCE_ADMISSION', 'Resource task has stopped admitting attachments');
+          attachmentsInProgress++;
+          try {
+            const owner = lease.owner;
+            await session.assertActive();
+            return await withAttachSession(session.plan, lease, owner, execute, session);
+          } finally {
+            attachmentsInProgress--;
+          }
         },
         async checkCapacity(phase) {
           await session.assertActive();
@@ -543,6 +552,12 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
       };
       try { result = await execute(session); }
       catch (error) { primaryError = error; }
+      attachAdmissionOpen = false;
+      if (attachmentsInProgress) {
+        lease.retain();
+        throw Object.assign(resourceError('RESOURCE_OWNERSHIP',
+          'Resource task returned while an attachment was still active'), { cleanupIncomplete: true, cause: primaryError });
+      }
       recordRetainedOwnership();
       if (signal?.aborted) primaryError ??= signal.reason;
       const executionSucceeded = !primaryError && result?.state !== 'unknown' &&

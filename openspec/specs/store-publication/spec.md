@@ -117,4 +117,4 @@ upload-only iOS release to an explicit existing manual draft before review.
 - **THEN** the runner verifies the installed policy and settled lifecycle state before admitting the exact saved release for attachment
 - **AND** the command preserves the activity lease and resource journal without scheduling reclamation, building or using other execution capabilities
 - **AND** interrupted ownership or a changed policy blocks attachment checkpoints and dispatch, preserving any recorded intent for reconciliation under a new lease
-- **AND** an unsettled source command keeps activity ownership for reconciliation
+- **AND** an unsettled source command or an attachment still running when its enclosing callback returns keeps activity ownership and defers settlement for reconciliation
