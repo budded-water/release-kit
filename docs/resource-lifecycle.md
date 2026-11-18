@@ -165,5 +165,19 @@ Two synthetic project adapters exercise their own source checks, repeated cache
 generations and protected overage. Additional tests cover hard links, historical
 cross-release/relative references, corrupt/truncated/missing events, typed diagnostic
 and Git-identity classification, bounded reports and compatibility refusal.
-Physical mount substitution, installed rollback/fencing, measured cold/warm native
-workloads and authorized legacy reconciliation remain separate OpenSpec gates.
+A private scratch-image rehearsal also replaced a registered empty leaf with an
+actual mounted filesystem. The changed device identity made the complete collection
+incomplete: an earlier eligible cache and the foreign mounted sentinel both survived.
+The newly created image was then detached and removed. This establishes mount
+substitution refusal, not permission to manipulate existing volumes.
+
+A copied private installation exercised actual compatible and legacy consumer
+controls. Ordinary status did not activate; explicit activation was required. The
+old bootstrap refused the new manifest, the new bootstrap refused the old control,
+and a manifest downgrade could not bypass an active feature. Restoring the compatible
+tuple preserved history and feature bytes. Unavailable capacity refused a task before
+its callback, CLI dry-run preserved state, and policy drift retained maintenance.
+These scratch rehearsals do not upgrade an existing installation or demonstrate
+rebuilding a reclaimed native product. Measured cold/warm workloads, live cutover,
+post-reclamation native reconstruction and authorized legacy reconciliation remain
+separate OpenSpec gates.
