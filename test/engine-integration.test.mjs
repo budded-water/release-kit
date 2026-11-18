@@ -1327,6 +1327,40 @@ test('managed attachment cannot commit a staged checkpoint after its parent retu
   });
 });
 
+test('managed attachment checks the captured owner and policy after staging intent', async t => {
+  for (const change of ['owner record', 'active policy']) await t.test(change, async t => {
+    const f = await attachFixture(t, { managed: true });
+    const lifecycle = await enableResourceLifecycle(f, 'checks');
+    const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic staged ownership change' });
+    f.options.resourceLifecycle = lifecycle;
+    f.options.resourceLease = lease;
+    const checkpointPause = pauseAttachmentCheckpoint(t, f, 'intent');
+    const attachment = f.invoke();
+    let restore;
+    try {
+      await Promise.race([checkpointPause.staged, attachment]);
+      const ownerChanged = change === 'owner record';
+      if (ownerChanged) restore = await displaceActivityRecord(f, lifecycle, lease, { replace: true });
+      else {
+        const path = join(f.store, 'resources', 'feature.json');
+        const bytes = await readFile(path, 'utf8');
+        await writeFile(path, JSON.stringify({ ...JSON.parse(bytes), policy: 'f'.repeat(64) }));
+        restore = () => writeFile(path, bytes);
+      }
+      checkpointPause.resume();
+      await assert.rejects(attachment, { code: ownerChanged ? 'COORDINATION_INVALID' : 'RESOURCE_COMPATIBILITY' });
+      assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+      assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+      assert.ok((await readdir(checkpointPause.events)).every(file => !file.endsWith('.tmp')));
+    } finally {
+      checkpointPause.resume();
+      checkpointPause.restore();
+      await restore?.();
+      await lease.release();
+    }
+  });
+});
+
 test('cancelling managed attach before intent commit leaves no pending attachment', async t => {
   const f = await attachFixture(t, { managed: true });
   const lifecycle = await enableResourceLifecycle(f, 'checks');

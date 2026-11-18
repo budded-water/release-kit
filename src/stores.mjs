@@ -163,7 +163,7 @@ function result(ctx, state, values = {}) {
   };
 }
 
-async function request(ctx, url, token, options = {}, beforeFetch) {
+async function request(ctx, url, token, options = {}, { authorize, beforeFetch } = {}) {
   ctx.signal?.throwIfAborted();
   const origin = new URL(url).origin;
   if (![APPLE, GOOGLE, IAM, new URL(OAUTH).origin].includes(origin))
@@ -171,6 +171,7 @@ async function request(ctx, url, token, options = {}, beforeFetch) {
   const bearer = typeof token === 'function' ? await token() : token;
   const headers = { ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}), ...options.headers };
   let response;
+  if (authorize) await authorize();
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 60000);
   const signal = ctx.signal ? AbortSignal.any([ctx.signal, timeout]) : timeout;
   beforeFetch?.();
@@ -1490,16 +1491,18 @@ export async function attachStoreBuild(ctx, { versionId } = {}) {
   if (!validBuild(freshBuild)) throw new StoreError('The uploaded build is no longer eligible for attachment.');
   if (await readBeforeWrite()) return finish(false);
   await save(ctx, 'ios-attach', { state: 'intent', versionId, buildId }, { signal: ctx.signal });
-  await ctx.assertAttachmentAdmission?.();
   let dispatched = false;
   try {
     await request(ctx, relationship, token, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ data: { type: 'builds', id: buildId } }),
-    }, () => {
-      ctx.signal.throwIfAborted();
-      ctx.assertAttachmentCurrent?.();
-      dispatched = true;
+    }, {
+      authorize: ctx.assertAttachmentAdmission,
+      beforeFetch() {
+        ctx.signal.throwIfAborted();
+        ctx.assertAttachmentCurrent?.();
+        dispatched = true;
+      },
     });
   } catch (error) {
     if (!dispatched) throw error;
