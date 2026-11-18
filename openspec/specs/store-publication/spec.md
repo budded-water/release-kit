@@ -1,8 +1,8 @@
 # store-publication Specification
 
 ## Purpose
-Define bounded iOS artifact upload, durable recovery and confirmed prepared-draft
-continuity without granting review or public-release intent. Full publication
+Define bounded iOS artifact upload and build attachment, durable recovery, and
+confirmed prepared-draft continuity without granting review or public-release intent. Full publication
 remains a separately authorized workflow with its existing gates.
 
 ## Requirements
@@ -77,3 +77,37 @@ intent, without transferring successful validation or build evidence.
 #### Scenario: Default source advances during continuity reads
 - **WHEN** the default source advances while the fresh provider continuity read is pending
 - **THEN** source revalidation refuses before predecessor revocation or upload intent
+
+### Requirement: Bounded iOS build attachment
+The system SHALL attach only the exact build of an existing owned, accepted,
+upload-only iOS release to an explicit existing manual draft before review.
+
+#### Scenario: Single relationship update and readback
+- **WHEN** the current app, draft and uploaded build match the recorded identities, the draft is ready for submission with no selected build, and required source and content gates pass
+- **THEN** the runner saves attachment intent and sends exactly one relationship PATCH for the uploaded build
+- **AND** completion requires an independent read confirming the same draft and build in the expected pre-review state
+- **AND** the action leaves upload, release settings, review submission and publication intent unchanged
+
+#### Scenario: Identity or ownership conflict
+- **WHEN** another build is selected, provider reads disagree on the relationship, the draft or build is missing or stale, or local ownership or acceptance is invalid
+- **THEN** the runner refuses the write instead of claiming or replacing the target
+
+#### Scenario: Source changes during provider verification
+- **WHEN** the source is no longer currently eligible after the provider checks
+- **THEN** the runner refuses before recording intent or sending the PATCH
+
+#### Scenario: Reconciliation without another write
+- **WHEN** the same build is already selected or an earlier attachment attempt exists
+- **THEN** the runner only reconciles the recorded relationship; a missing or unknown result cannot authorize another PATCH
+- **AND** the runner blocks publication while attachment intent is unresolved, and the built-in iOS publisher confirms the draft state and saved build relationship directly before proceeding
+
+#### Scenario: Existing unsubmitted-upload handoff
+- **WHEN** a higher build requests an otherwise eligible unsubmitted-upload handoff
+- **THEN** a confirmed attachment permits that handoff only with fresh matching unsubmitted evidence for the saved build and a direct read confirming the saved draft remains pre-review with the expected relationship or confirming its absence
+- **AND** unresolved attachment intent blocks ownership transfer even with a saved terminal outcome
+- **AND** a saved terminal outcome with a confirmed attachment requires fresh terminal verification before ownership transfer
+
+#### Scenario: Explicit local scope
+- **WHEN** the operator uses ordinary resume, a read-only launcher or dispatch
+- **THEN** it cannot initiate the attachment operation
+- **AND** attachment uses the existing upload checkpoint and locks without creating another release or advancing its approval scope

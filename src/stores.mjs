@@ -753,6 +753,26 @@ async function prepareAppleReleasePolicy(ctx, token, versionId) {
   }
 }
 
+function appleDraftResource(versionId) {
+  return `${APPLE}/v1/appStoreVersions/${segment(versionId)}`;
+}
+
+function appleBuildRelationship(versionId) {
+  return `${appleDraftResource(versionId)}/relationships/build`;
+}
+
+function matchesAppleDraft(draft, versionId, version, state) {
+  return typeof state === 'string' && state.length > 0 &&
+    draft?.type === 'appStoreVersions' && draft.id === versionId &&
+    draft.attributes?.platform === 'IOS' && draft.attributes.versionString === version &&
+    (draft.attributes.appVersionState ?? draft.attributes.appStoreState) === state;
+}
+
+function matchesAppleBuild(linkage, buildId) {
+  return typeof buildId === 'string' && buildId.length > 0 &&
+    linkage?.id === buildId && linkage.type === 'builds';
+}
+
 async function publishApple(ctx, cfg, { uploadOnly = false } = {}) {
   const metadata = await sourcePath(ctx, cfg.metadataPath, true);
   let information;
@@ -767,7 +787,23 @@ async function publishApple(ctx, cfg, { uploadOnly = false } = {}) {
       throw new StoreError('Review submission information must be a JSON object.');
   }
   const token = await appleToken(ctx, cfg);
+  const attachment = uploadOnly ? undefined : previous(ctx, 'ios-attach');
+  const assertAttachedDraft = async observed => {
+    if (!attachment) return;
+    const { versionId, buildId } = attachment;
+    if (observed.versionId === versionId && observed.buildId === buildId &&
+        matchesAppleBuild(observed.target?.relationships?.build?.data, buildId)) {
+      const draft = (await request(ctx, `${appleDraftResource(versionId)}?include=build`, token))?.data;
+      if (matchesAppleDraft(draft, versionId, ctx.artifact.version, observed.appleState) &&
+          matchesAppleBuild(draft.relationships?.build?.data, buildId)) {
+        const linkage = await request(ctx, appleBuildRelationship(versionId), token);
+        if (matchesAppleBuild(linkage?.data, buildId)) return;
+      }
+    }
+    throw new StoreError('The confirmed iOS attachment changed; inspect the draft before publication.');
+  };
   let observed = await observeApple(ctx, cfg, token, { allowRejectedReplacement: true });
+  await assertAttachedDraft(observed);
   const upload = previous(ctx, 'ios-upload');
   if (observed.build && !upload)
     throw new StoreError(
@@ -857,6 +893,7 @@ async function publishApple(ctx, cfg, { uploadOnly = false } = {}) {
   await appleListing(ctx, cfg, token, metadata);
   // Reconcile again immediately before selecting/changing the store version.
   observed = await observeApple(ctx, cfg, token, { allowRejectedReplacement: true });
+  await assertAttachedDraft(observed);
   if (observed.state) return appleResult(ctx, observed);
   if (!observed.build || observed.build.attributes.processingState !== 'VALID')
     return appleResult(ctx, observed);
@@ -1374,8 +1411,103 @@ export async function uploadStore(ctx) {
   return publishApple(ctx, cfg, { uploadOnly: true });
 }
 
+// One explicit operation on an existing upload. The runner owns the release
+// and target locks and supplies the production-source gate before a write.
+export async function attachStoreBuild(ctx, { versionId } = {}) {
+  const deadline = AbortSignal.timeout(120_000);
+  ctx = { ...ctx, signal: ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline };
+  ctx.signal.throwIfAborted();
+  if (ctx.platform !== 'ios' || ctx.uploadRequested !== true || ctx.publicationRequested !== false ||
+      previous(ctx, 'ios-review') || previous(ctx, 'ios-release-policy'))
+    throw new StoreError('Attach requires an upload-only iOS release before publication or review.');
+  const validId = id => typeof id === 'string' && /^[A-Za-z0-9-]{1,80}$/.test(id);
+  const cfg = settings(ctx);
+  const artifact = identity(ctx);
+  const upload = previous(ctx, 'ios-upload');
+  if (!validId(versionId) || upload?.state !== 'uploaded' || !validId(upload.buildId))
+    throw new StoreError('Attach requires an explicit draft ID and an exact confirmed upload build ID.');
+  const buildId = upload.buildId;
+  const prior = previous(ctx, 'ios-attach');
+  if (prior && (prior.versionId !== versionId || prior.buildId !== buildId ||
+      !['intent', 'attached'].includes(prior.state)))
+    throw new StoreError('The recorded attachment belongs to a different draft or build.');
+  const preparedId = ctx.preparation?.observation?.remote?.target?.id;
+  if ((cfg.contentPath && !preparedId) || (preparedId && preparedId !== versionId))
+    throw new StoreError('Attach requires the same recorded prepared draft.');
+
+  const token = await appleToken(ctx, cfg);
+  const observed = await observeApple(ctx, cfg, token);
+  const validBuild = build => build?.id === buildId && build.type === 'builds' &&
+    build.attributes?.version === artifact.buildNumber && build.attributes?.processingState === 'VALID' &&
+    build.attributes.expired === false;
+  if (observed.target?.id !== versionId || observed.appleState !== 'PREPARE_FOR_SUBMISSION' ||
+      observed.target.attributes?.releaseType !== 'MANUAL' || !validBuild(observed.build))
+    throw new StoreError('The exact manual draft and valid, unexpired uploaded build must be available.');
+
+  const draft = appleDraftResource(versionId);
+  const relationship = appleBuildRelationship(versionId);
+  const readSelection = async () => {
+    const version = (await request(ctx, `${draft}?include=build`, token))?.data;
+    if (!matchesAppleDraft(version, versionId, artifact.version, 'PREPARE_FOR_SUBMISSION') ||
+        version.attributes.releaseType !== 'MANUAL')
+      throw new StoreError('The selected iOS draft is no longer an editable manual draft.');
+    const snapshot = version.relationships?.build?.data;
+    const selected = (await request(ctx, relationship, token))?.data;
+    const expected = linkage => linkage === null || matchesAppleBuild(linkage, buildId);
+    if (!expected(snapshot) || !expected(selected) || (snapshot === null) !== (selected === null))
+      throw new StoreError('The draft build relationship is unavailable, inconsistent or points to a different build.');
+    return selected;
+  };
+  const readBeforeWrite = async () => {
+    const listed = observed.target.relationships?.build?.data;
+    const selected = await readSelection();
+    if (selected === null ? listed !== null : !matchesAppleBuild(listed, buildId))
+      throw new StoreError('The draft inventory and direct build relationship disagree.');
+    return selected;
+  };
+  const finish = async (writeAttempted) => {
+    ctx.signal?.throwIfAborted();
+    if (prior?.state !== 'attached') await save(ctx, 'ios-attach', { state: 'attached', versionId, buildId });
+    return result(ctx, 'attached', { versionId, buildId, writeAttempted, releaseType: 'MANUAL' });
+  };
+  const unconfirmed = writeAttempted => result(ctx, 'unknown', { versionId, buildId, writeAttempted,
+    message: 'Attachment is unconfirmed. Rerun attach with the same draft to reconcile; it will not repeat the write.' });
+  if (await readBeforeWrite()) return finish(false);
+  if (prior) return unconfirmed(false);
+
+  if (typeof ctx.assertPublicationSource !== 'function')
+    throw new StoreError('Attach requires the production source gate.');
+  await ctx.assertPublicationSource();
+  if (cfg.contentPath) {
+    const { verifyPreparedAppleContent } = await import('./store-content.mjs');
+    const verified = await verifyPreparedAppleContent(ctx);
+    if (verified.versionId !== versionId) throw new StoreError('Prepared draft identity changed.');
+  }
+  // Recheck eligibility after source/content gates and selection immediately before intent.
+  const freshBuild = (await request(ctx, `${APPLE}/v1/builds/${segment(buildId)}`, token))?.data;
+  if (!validBuild(freshBuild)) throw new StoreError('The uploaded build is no longer eligible for attachment.');
+  if (await readBeforeWrite()) return finish(false);
+  await save(ctx, 'ios-attach', { state: 'intent', versionId, buildId });
+  try {
+    await request(ctx, relationship, token, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: { type: 'builds', id: buildId } }),
+    });
+  } catch {
+    // A lost response may have committed. Read once, never repeat the PATCH.
+    ctx.signal?.throwIfAborted();
+  }
+  let selected;
+  try { selected = await readSelection(); }
+  catch { ctx.signal?.throwIfAborted(); return unconfirmed(true); }
+  return selected ? finish(true) : unconfirmed(true);
+}
+
 export async function publishStore(ctx) {
   ctx.signal?.throwIfAborted();
+  const attachment = ctx.platform === 'ios' ? previous(ctx, 'ios-attach') : undefined;
+  if (attachment && attachment.state !== 'attached')
+    throw new StoreError('Reconcile the pending iOS attachment before publication.');
   const cfg = settings(ctx);
   identity(ctx);
   await verifyFile(ctx);
@@ -1387,12 +1519,39 @@ export async function statusStore(ctx) {
     const cfg = settings(ctx);
     identity(ctx);
     if (ctx.platform === 'ios') {
-      const observed = await observeApple(ctx, cfg, await appleToken(ctx, cfg));
+      const token = await appleToken(ctx, cfg);
+      const observed = await observeApple(ctx, cfg, token);
       if ((observed.build || observed.upload) && !previous(ctx, 'ios-upload'))
         throw new StoreError(
           'Remote build identity has no matching upload journal; artifact ownership is unverified.',
         );
-      return appleResult(ctx, observed);
+      const output = appleResult(ctx, observed);
+      const attachment = previous(ctx, 'ios-attach');
+      const terminal = ['available', 'released', 'rejected'].includes(output.state);
+      if (!attachment || (!output.unsubmittedUpload && !terminal)) return output;
+
+      const { unsubmittedUpload, ...status } = output;
+      if (attachment.state !== 'attached') return status;
+      const uncertain = terminal ? { ...status, state: 'unknown',
+        message: 'The recorded iOS draft state or build relationship could not be confirmed.' } : status;
+      const { versionId, buildId } = attachment;
+      if (observed.buildId !== buildId || (observed.versionId && observed.versionId !== versionId))
+        return uncertain;
+      let draft;
+      try {
+        draft = (await request(ctx, `${appleDraftResource(versionId)}?include=build`, token))?.data;
+      } catch (error) {
+        if (!observed.versionId && error instanceof StoreError && error.status === 404) return output;
+        throw error;
+      }
+      if (!observed.versionId ||
+          !matchesAppleDraft(draft, versionId, ctx.artifact.version, observed.appleState)) return uncertain;
+      const expected = observed.target?.relationships?.build?.data;
+      const agrees = linkage => expected === null ? linkage === null
+        : matchesAppleBuild(expected, buildId) && matchesAppleBuild(linkage, buildId);
+      if (!agrees(draft.relationships?.build?.data)) return uncertain;
+      const linkage = await request(ctx, appleBuildRelationship(versionId), token);
+      return agrees(linkage?.data) ? output : uncertain;
     }
     const token = await googleToken(ctx, cfg);
     const observed = await observePlay(ctx, cfg, token);

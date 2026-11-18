@@ -3,6 +3,7 @@ import { delimiter, dirname, join } from 'node:path';
 import {
   acquireLock as acquireStateLock,
   atomicJson,
+  canonicalPrivatePath,
   digest,
   loadState,
   privateDirectory,
@@ -19,6 +20,7 @@ import {
   acceptanceConfig,
 } from './plan.mjs';
 import { prepareStoreContent, verifyAppleDraftContinuity } from './store-content.mjs';
+import { attachStoreBuild } from './stores.mjs';
 import { requireProject } from './project.mjs';
 import { createCleanupGuard } from './cleanup.mjs';
 import { runCommand } from './command.mjs';
@@ -474,7 +476,7 @@ export function createRunner({
         return false;
       const providerKeys =
         platform === 'ios'
-          ? ['ios-upload', 'ios-review']
+          ? ['ios-upload', 'ios-review', 'ios-attach']
           : ['android-edit', 'android-upload', 'android-track', 'android-commit'];
       const hasProviderIntent = (checkpoints) =>
         Object.keys(checkpoints).some((name) => name !== 'expo.environment');
@@ -502,6 +504,10 @@ export function createRunner({
         );
       }
       const checkpoints = previous.checkpoints?.[platform] ?? {};
+      const attachment = platform === 'ios' ? checkpoints['ios-attach'] : undefined;
+      if (attachment && (attachment.state !== 'attached' ||
+          attachment.buildId !== checkpoints['ios-upload']?.buildId))
+        return false;
       const unpublished = !hasProviderIntent(checkpoints);
       const prepared = previous.storePreparation?.[platform];
       const proposed = state.storePreparation?.[platform];
@@ -583,6 +589,8 @@ export function createRunner({
           String(platform === 'ios' ? proof.buildNumber : proof.versionCode) !==
             String(artifact.buildNumber) ||
           !(platform === 'ios' ? proof.buildId : proof.editId) ||
+          (attachment && (proof.buildId !== attachment.buildId ||
+            (proof.versionId !== null && proof.versionId !== attachment.versionId))) ||
           (platform === 'android' && proof.editId !== checkpoints['android-edit']?.id) ||
           (unuploadedEdit && (proof.uploadState !== 'absent' || proof.track !== 'production'))
         )
@@ -666,7 +674,7 @@ export function createRunner({
       }
     }
   }
-  async function publicationOwnership(state, directory, platform) {
+  async function publicationOwnership(state, directory, platform, { existingOnly = false } = {}) {
     const appId = state.artifacts[platform]?.appId ?? state.plan.appIds[platform];
     const key = digest({ appId, platform, destination: state.plan.destinations[platform] });
     const ownerPath = join(store, 'targets', `${key}.json`);
@@ -677,6 +685,12 @@ export function createRunner({
         owner = await readJson(ownerPath);
       } catch (error) {
         if (error.code !== 'ENOENT') throw error;
+      }
+      if (existingOnly) {
+        if (owner?.id !== state.plan.id || owner.source !== state.plan.source || owner.appId !== appId ||
+            owner.platform !== platform || owner.destination !== state.plan.destinations[platform])
+          throw new Error('Existing publication target ownership is required for attachment');
+        return unlock;
       }
       if (owner && owner.id !== state.plan.id) {
         if (state.stages[`publish-${platform}`] || state.stages[`upload-${platform}`])
@@ -690,9 +704,27 @@ export function createRunner({
         await command('git', ['merge-base', '--is-ancestor', owner.source, state.plan.source], {
           cwd: repo,
         });
-        const previous = await loadState(releasePath(store, owner.id));
+        const previousDirectory = releasePath(store, owner.id);
+        const previous = await loadState(previousDirectory);
+        const attachment = platform === 'ios' ? previous?.checkpoints?.ios?.['ios-attach'] : undefined;
+        if (attachment && attachment.state !== 'attached')
+          throw new Error('Reconcile the pending iOS attachment before transferring publication ownership');
+        const terminalStates = ['available', 'released', 'rejected'];
+        let terminal = terminalStates.includes(previous?.outcomes?.[platform]?.state);
+        if (terminal && attachment) {
+          const unlockPrevious = await acquireLock(join(store, 'locks', `${owner.id}.lock`));
+          try {
+            const saved = await loadState(previousDirectory);
+            const observation = await cleanup.run(() => adapters[platform].status(
+              context(saved, previousDirectory, platform, checkoutDirectory(saved, previousDirectory, platform)),
+            ));
+            terminal = terminalStates.includes(observation.state);
+          } finally {
+            await unlockPrevious();
+          }
+        }
         if (
-          !['available', 'released', 'rejected'].includes(previous?.outcomes?.[platform]?.state) &&
+          !terminal &&
           !(
             ((platform === 'ios' && previous?.storePreparation?.ios?.status === 'prepared') ||
               (platform === 'android' &&
@@ -741,14 +773,16 @@ export function createRunner({
     resourceMaintenance = completed.maintenance;
     return completed.result;
   }
-  async function admittedRelease(plan, task) {
+  async function admittedRelease(plan, task, { existingOnly = false } = {}) {
     await assertResourceAdmission({ store, plan, session: resourceContext.getStore() });
     await cleanup.assertSafe();
     const directory = releasePath(store, plan.id);
-    await privateDirectory(directory);
+    if (!existingOnly) await privateDirectory(directory);
     const unlock = await acquireLock(join(store, 'locks', `${plan.id}.lock`));
     try {
+      if (existingOnly) await canonicalPrivatePath(join(directory, 'events'));
       let state = await loadState(directory);
+      if (existingOnly && !state) throw new Error('Unknown release ID');
       if (state && digest(state.plan) !== digest(plan))
         throw new Error('Release plan identity mismatch');
       state ??= {
@@ -820,6 +854,32 @@ export function createRunner({
       }
     }, 'content');
   }
+  async function attachBuild(plan, { versionId } = {}) {
+    if (plan.platforms.length !== 1 || plan.platforms[0] !== 'ios' || plan.destinations?.ios !== 'app-store')
+      throw new Error('Attach requires one existing iOS App Store release');
+    if (digest(config) !== plan.configDigest)
+      throw new Error('Attach requires the original release configuration');
+    const task = async (state, directory) => {
+      const artifact = state.artifacts.ios;
+      const accepted = state.acceptance.ios;
+      if (state.stages['build-ios']?.status !== 'succeeded' || !artifact ||
+          state.acceptanceStatus?.ios?.state !== 'passed' || accepted?.passed !== true ||
+          accepted.source !== plan.source || accepted.platform !== 'ios' || accepted.artifactSha256 !== artifact.sha256)
+        throw new Error('Attach requires the existing built artifact and passing, matching native acceptance');
+      if (state.uploadRequested !== true || state.publicationRequested !== false ||
+          state.stages['publish-ios'] || state.supersededBy?.ios)
+        throw new Error('Attach requires an upload-only release before publication, with no supersession');
+      const unlock = await publicationOwnership(state, directory, 'ios', { existingOnly: true });
+      try {
+        const root = checkoutDirectory(state, directory, 'ios');
+        const report = await attachStoreBuild(context(state, directory, 'ios', root), { versionId });
+        return { operation: 'attach', releaseId: plan.id, ...report };
+      } finally {
+        await unlock();
+      }
+    };
+    return resourceContext.run(resourceSession, () => admittedRelease(plan, task, { existingOnly: true }));
+  }
   async function validate(plan, { ui = false } = {}) {
     if (typeof ui !== 'boolean') throw new Error('UI validation selection must be boolean');
     return withRelease(plan, async (state, directory) => {
@@ -834,6 +894,9 @@ export function createRunner({
     if (typeof uploadOnly !== 'boolean' || (uploadOnly && (publish || retryBuild)))
       throw new Error('Upload-only execution cannot grant publication or retry a build');
     return withRelease(plan, async (state, directory) => {
+      const attachment = state.checkpoints.ios?.['ios-attach'];
+      if ((publish || state.publicationRequested) && attachment && attachment.state !== 'attached')
+        throw new Error('Reconcile the pending iOS attachment before publication');
       if (state.uploadRequested !== undefined && typeof state.uploadRequested !== 'boolean')
         throw new Error('Invalid saved upload intent');
       if (uploadOnly && (state.publicationRequested || state.checkpoints.ios?.['ios-review'] ||
@@ -1251,6 +1314,6 @@ export function createRunner({
       await unlock();
     }
   }
-  return { execute, validate, status, observe, prepareContent,
+  return { execute, validate, status, observe, prepareContent, attachBuild,
     get resourceMaintenance() { return resourceMaintenance; } };
 }

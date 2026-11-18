@@ -52,6 +52,7 @@ validate --config <private.json> --ref <commit> [--platforms ...] [--ui]
 run --config <private.json> --ref <commit> [--platforms ...] [--publish]
 resume <release-id> --config <private.json> [--publish]
 upload <release-id> --config <private.json> (local, existing accepted iOS artifact)
+attach <release-id> --config <private.json> --version-id <apple-draft-id> (local, exact uploaded build only)
 status <release-id> [--remote --config <private.json> [--wait <seconds> --poll-interval <seconds>]]
 executor-doctor --executor-config <private-policy.json>
 executor-check --executor-config <private-policy.json> [--executor local|auto|github]
@@ -132,6 +133,7 @@ export async function main({
       help: { type: 'boolean' },
       summary: { type: 'boolean', default: false },
       'retry-build': { type: 'string' },
+      'version-id': { type: 'string' },
       reconciled: { type: 'string' },
       release: { type: 'string', multiple: true },
       request: { type: 'string', multiple: true },
@@ -174,6 +176,7 @@ export async function main({
       'run',
       'resume',
       'upload',
+      'attach',
       'status',
       'executor-doctor',
       'executor-check',
@@ -186,6 +189,15 @@ export async function main({
       values.acceptance || values['retry-build'] || values.reconciled ||
       values.executor !== 'local' || values['executor-config']))
     throw new Error('Upload accepts an existing release ID and local execution only');
+  if (operation === 'attach') {
+    if (!/^[A-Za-z0-9-]{1,80}$/.test(values['version-id'] ?? '') || dispatchBinding ||
+        Object.keys(values).some(key => !['config', 'state-dir', 'version-id', 'executor', 'publish', 'ui', 'remote', 'summary'].includes(key) ||
+          (['publish', 'ui', 'remote', 'summary'].includes(key) && values[key]) ||
+          (key === 'executor' && values[key] !== 'local')))
+      throw new Error('Attach accepts an existing release ID, explicit draft --version-id and local configuration only');
+  } else if (values['version-id'] !== undefined) {
+    throw new Error('--version-id is only valid for attach or standalone store reads');
+  }
   const operatorOperation = ['store-record', 'store-handoff'].includes(operation);
   if ((values.receipt !== undefined) !== (operation === 'store-record'))
     throw new Error('--receipt is required only for store-record');
@@ -283,7 +295,7 @@ export async function main({
     throw new Error('Executor check does not accept release, publication or recovery options');
   const dispatchOperation = ['dispatch-status', 'dispatch-resume'].includes(operation);
   const needsId =
-    ['resume', 'upload', 'status', 'store-apply', 'store-observe', 'store-record', 'store-handoff'].includes(
+    ['resume', 'upload', 'attach', 'status', 'store-apply', 'store-observe', 'store-record', 'store-handoff'].includes(
       operation,
     ) || dispatchOperation;
   if (positionals.length !== (needsId ? 2 : 1)) throw new Error('Invalid positional arguments');
@@ -641,6 +653,16 @@ export async function main({
       resourceLease,
       resourceSession,
     });
+    if (operation === 'attach') {
+      try {
+        const report = await runner.attachBuild(plan, { versionId: values['version-id'] });
+        output(JSON.stringify(report, null, 2));
+        return interrupted ? 130 : report.state === 'attached' ? 0 : 2;
+      } catch (error) {
+        if (interrupted) return 130;
+        throw error;
+      }
+    }
     if (contentOperation) {
       const report = await runner.prepareContent(plan, {
         mode: operation.slice('store-'.length),
