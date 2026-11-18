@@ -192,15 +192,19 @@ async function writeOwner(path, owner) {
   await syncDirectory(dirname(path));
 }
 
-async function removeOwned(path, owner, expectedStat) {
+async function assertOwnerRecord(path, owner, expectedStat) {
   const current = await readOwner(path, owner.kind);
   if (
     !sameFile(current.stat, expectedStat) ||
     !OWNER_KEYS.every((key) => current.owner[key] === owner[key])
   )
     throw invalid(
-      `Coordination ownership changed; refusing to remove another owner's evidence: ${path}`,
+      `Coordination ownership record changed: ${path}`,
     );
+}
+
+async function removeOwned(path, owner, expectedStat) {
+  await assertOwnerRecord(path, owner, expectedStat);
   await unlink(path);
   await syncDirectory(dirname(path));
 }
@@ -298,6 +302,15 @@ async function acquire(anchor, kind, { operation } = {}) {
     get owner() { return owner; },
     get retained() { return retained; },
     retain() { retained = true; },
+    async assertOwnership({ expectedOwner = owner, expectedAnchor = anchor } = {}) {
+      if (expectedAnchor !== anchor) throw invalid('Coordination lease belongs to a different anchor');
+      await underGate(anchor, identity, async () => {
+        if (released || retained || owner !== expectedOwner)
+          throw invalid('Coordination lease is no longer current');
+        await inventory(anchor);
+        await assertOwnerRecord(path, owner, stat);
+      });
+    },
     async transition(nextKind) {
       if (released || retained || !['maintenance', 'activity'].includes(nextKind))
         throw invalid('Cannot transition a released lease or unknown ownership kind');

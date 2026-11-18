@@ -335,37 +335,43 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
     return { taskId: task.id, state: task.state, provenance: 'operator-attested' };
   }
 
-  async function admitAttach({ plan, lease, execute } = {}) {
+  async function assertAttachActivity(lease, owner) {
     signal?.throwIfAborted();
-    if (typeof execute !== 'function' || !/^release-[a-f0-9]{24}$/.test(plan?.id ?? '') ||
-        !/^[a-f0-9]{40}$/.test(plan?.source ?? '') || !lease?.owner || lease.retained)
-      throw resourceError('RESOURCE_ADMISSION', 'Managed attachment requires a bound plan and a live activity lease');
-    const owner = lease.owner;
-    await assertCoordinationOwner(anchor, owner, 'activity');
+    if (owner?.kind !== 'activity' || typeof lease?.assertOwnership !== 'function' ||
+        lease.retained || lease.owner !== owner)
+      throw resourceError('RESOURCE_ADMISSION', 'Managed attachment requires a current activity lease from the attach-aware coordinator');
     await feature();
+    await lease.assertOwnership({ expectedOwner: owner, expectedAnchor: anchor });
+  }
+
+  async function withAttachSession(plan, lease, owner, execute, parent) {
+    const admitted = Object.freeze({
+      store, plan: Object.freeze({ id: plan.id, source: plan.source }), operation: 'attach',
+      async assertActive() {
+        if (!sessions.has(admitted) || (parent && !sessions.has(parent)))
+          throw resourceError('RESOURCE_ADMISSION', 'Managed attachment admission has expired');
+        await assertAttachActivity(lease, owner);
+      },
+    });
+    sessions.add(admitted);
+    try {
+      await admitted.assertActive();
+      return await execute(admitted);
+    } finally {
+      sessions.delete(admitted);
+    }
+  }
+
+  async function admitAttach({ plan, lease, execute } = {}) {
+    if (typeof execute !== 'function' || !/^release-[a-f0-9]{24}$/.test(plan?.id ?? '') ||
+        !/^[a-f0-9]{40}$/.test(plan?.source ?? ''))
+      throw resourceError('RESOURCE_ADMISSION', 'Managed attachment requires a bound release plan');
+    const owner = lease?.owner;
+    await assertAttachActivity(lease, owner);
     const { state } = await readResourceLedger(store);
     if (Object.values(state.tasks).some(task => task.state !== 'settled'))
       throw resourceError('RESOURCE_OWNERSHIP', 'Prior resource task requires explicit settlement reconciliation');
-
-    const session = Object.freeze({
-      store, plan: Object.freeze({ id: plan.id, source: plan.source }), operation: 'attach',
-      async assertActive() {
-        signal?.throwIfAborted();
-        if (!sessions.has(session) || lease.retained || lease.owner !== owner)
-          throw resourceError('RESOURCE_ADMISSION', 'Managed attachment admission has expired');
-        await feature();
-        await assertCoordinationOwner(anchor, owner, 'activity');
-        if (lease.owner !== owner)
-          throw resourceError('RESOURCE_ADMISSION', 'Managed attachment activity changed');
-      },
-    });
-    sessions.add(session);
-    try {
-      await session.assertActive();
-      return await execute(session);
-    } finally {
-      sessions.delete(session);
-    }
+    return withAttachSession(plan, lease, owner, execute);
   }
 
   async function run({ plan, operation, lease: suppliedLease, pendingRequest, execute, settle = async () => {} } = {}) {
@@ -422,6 +428,11 @@ export function createResourceLifecycle({ stateDirectory, policy, adapter, signa
           signal?.throwIfAborted();
           if (!sessions.has(session)) throw resourceError('RESOURCE_ADMISSION', 'Resource task admission has expired');
           await assertCoordinationOwner(anchor, lease.owner, 'activity');
+        },
+        async admitAttach(execute) {
+          const owner = lease.owner;
+          await session.assertActive();
+          return withAttachSession(session.plan, lease, owner, execute, session);
         },
         async checkCapacity(phase) {
           await session.assertActive();

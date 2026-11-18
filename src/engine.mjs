@@ -888,6 +888,10 @@ export function createRunner({
     };
     const execute = session => resourceContext.run(session, () =>
       admittedRelease(plan, task, { existingOnly: true, operation: 'attach' }));
+    if (resourceSession?.admitAttach) {
+      await assertResourceAdmission({ store, plan, session: resourceSession, operation: 'attach' });
+      return resourceSession.admitAttach(execute);
+    }
     if (resourceSession || !resourceLifecycle) return execute(resourceSession);
     return resourceLifecycle.admitAttach({ plan, lease: resourceLease, execute });
   }

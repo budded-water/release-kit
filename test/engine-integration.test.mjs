@@ -2,7 +2,7 @@ import test from 'node:test';
 import { generateKeyPairSync, verify } from 'node:crypto';
 import { statusStore, uploadStore } from '../src/stores.mjs';
 import assert from 'node:assert/strict';
-import { mkdtemp, realpath, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, mkdir, writeFile, readFile, readdir, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRunner } from '../src/engine.mjs';
@@ -14,7 +14,7 @@ import { loadStoreContent } from '../src/store-content.mjs';
 import { createRequest, dispatchRequest, runRequest, readRequestStatus, inspectDispatchRequests } from '../src/executor.mjs';
 import { workerMain } from '../src/worker.mjs';
 import { createResourceLifecycle } from '../src/resource-lifecycle.mjs';
-import { readResourceLedger } from '../src/resource-ledger.mjs';
+import { appendResourceState, readResourceLedger } from '../src/resource-ledger.mjs';
 import { inspectResourceReferences } from '../src/resource-references.mjs';
 import { acquireActivity, acquireMaintenance, assertCoordinationOwner } from '../src/coordination.mjs';
 import { executionHandlers } from '../src/execution.mjs';
@@ -795,16 +795,31 @@ test('managed attach borrows its installed activity without starting a resource 
   const lifecycle = await enableResourceLifecycle(f, 'checks');
   f.options.resourceLifecycle = lifecycle;
   await assert.rejects(f.invoke(), { code: 'RESOURCE_ADMISSION' });
+  const otherAnchor = join(f.base, 'other-coordination');
+  await mkdir(otherAnchor, { mode: 0o700 });
+  const foreignLease = await acquireActivity(otherAnchor, { operation: 'synthetic foreign activity' });
+  try {
+    f.options.resourceLease = foreignLease;
+    await assert.rejects(f.invoke(), { code: 'COORDINATION_INVALID' });
+    assert.deepEqual(f.requests, []);
+  } finally {
+    await foreignLease.release();
+  }
   const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic managed attach' });
   const owner = lease.owner;
   const ledger = await readResourceLedger(f.store);
   const calls = [...f.calls];
+  const another = { ...f.plan, id: 'release-' + 'e'.repeat(24) };
+  await saveState(releasePath(f.store, another.id), { ...(await f.state()), plan: another });
   let session;
   try {
     await lifecycle.admitAttach({ plan: f.plan, lease, execute: async admitted => {
       session = admitted;
       const runner = createRunner({ ...f.options, resourceSession: admitted });
       await assert.rejects(runner.validate(f.plan), { code: 'RESOURCE_ADMISSION' });
+      await assert.rejects(runner.attachBuild(another, { versionId: 'manual-draft' }),
+        { code: 'RESOURCE_ADMISSION' });
+      assert.equal((await loadState(releasePath(f.store, another.id))).checkpoints.ios['ios-attach'], undefined);
     } });
     await assert.rejects(createRunner({ ...f.options, resourceSession: session })
       .attachBuild(f.plan, { versionId: 'manual-draft' }), { code: 'RESOURCE_ADMISSION' });
@@ -827,7 +842,8 @@ test('managed attach borrows its installed activity without starting a resource 
 
 test('managed attach refuses intent if activity or activation changes during provider reads', async t => {
   for (const [variant, code] of [['released', 'COORDINATION_INVALID'], ['transitioned', 'RESOURCE_ADMISSION'],
-      ['marker-missing', 'RESOURCE_ADMISSION'], ['marker-changed', 'RESOURCE_COMPATIBILITY']]) {
+      ['owner-replaced', 'COORDINATION_INVALID'], ['marker-missing', 'RESOURCE_ADMISSION'],
+      ['marker-changed', 'RESOURCE_COMPATIBILITY']]) {
     await t.test(variant, async t => {
       const f = await attachFixture(t, { managed: true });
       const lifecycle = await enableResourceLifecycle(f, 'checks');
@@ -835,11 +851,19 @@ test('managed attach refuses intent if activity or activation changes during pro
       f.options.resourceLifecycle = lifecycle;
       f.options.resourceLease = lease;
       const marker = join(f.store, 'resources', 'feature.json');
+      const ownerPath = join(lifecycle.coordinationAnchor, 'activity-' + lease.owner.token + '.json');
+      const originalOwnerPath = join(f.base, 'original-owner.json');
+      let replacedOwner = false;
       f.remote.onFreshBuild = async () => {
         if (variant === 'released') await lease.release();
         if (variant === 'transitioned') {
           await lease.transition('maintenance');
           await lease.transition('activity');
+        }
+        if (variant === 'owner-replaced') {
+          await rename(ownerPath, originalOwnerPath);
+          replacedOwner = true;
+          await writeFile(ownerPath, await readFile(originalOwnerPath), { mode: 0o600 });
         }
         if (variant === 'marker-missing') await rm(marker);
         if (variant === 'marker-changed') {
@@ -851,6 +875,66 @@ test('managed attach refuses intent if activity or activation changes during pro
         await assert.rejects(f.invoke(), { code });
         assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
         assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+      } finally {
+        if (replacedOwner) await rename(originalOwnerPath, ownerPath);
+        await lease.release();
+      }
+    });
+  }
+});
+
+test('managed attach refuses unsettled lifecycle history before provider access', async t => {
+  const f = await attachFixture(t, { managed: true });
+  const lifecycle = await enableResourceLifecycle(f, 'checks');
+  const maintenance = await acquireMaintenance(lifecycle.coordinationAnchor, { operation: 'record synthetic interrupted task' });
+  try {
+    const ledger = await readResourceLedger(f.store);
+    const id = '11111111-1111-4111-8111-111111111111';
+    ledger.state.tasks[id] = { id, releaseId: f.plan.id, source: f.plan.source, operation: 'execute',
+      state: 'active', owner: maintenance.owner.token, phase: 'execute', reservedBytes: 1 };
+    await appendResourceState(f.store, ledger, () => maintenance.assertOwnership());
+  } finally {
+    await maintenance.release();
+  }
+  const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic attach before recovery' });
+  try {
+    f.options.resourceLifecycle = lifecycle;
+    f.options.resourceLease = lease;
+    await assert.rejects(f.invoke(), { code: 'RESOURCE_OWNERSHIP' });
+    assert.deepEqual(f.requests, []);
+    assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+  } finally {
+    await lease.release();
+  }
+});
+
+test('managed attach derives the same continuous guard from an existing heavy session', async t => {
+  for (const [variant, code] of [['transitioned', 'RESOURCE_ADMISSION'], ['marker-changed', 'RESOURCE_COMPATIBILITY']]) {
+    await t.test(variant, async t => {
+      const f = await attachFixture(t, { managed: true });
+      const lifecycle = await enableResourceLifecycle(f, 'checks');
+      const lease = await acquireActivity(lifecycle.coordinationAnchor, { operation: 'synthetic managed parent' });
+      const marker = join(f.store, 'resources', 'feature.json');
+      const markerBytes = await readFile(marker);
+      f.remote.onFreshBuild = async () => {
+        if (variant === 'transitioned') {
+          await lease.transition('maintenance');
+          await lease.transition('activity');
+        } else {
+          await writeFile(marker, JSON.stringify({ ...JSON.parse(markerBytes), policy: 'f'.repeat(64) }));
+        }
+      };
+      try {
+        await lifecycle.run({ plan: f.plan, operation: 'execute', lease, execute: async resourceSession => {
+          try {
+            const runner = createRunner({ ...f.options, resourceSession });
+            await assert.rejects(runner.attachBuild(f.plan, { versionId: 'manual-draft' }), { code });
+            assert.equal((await f.state()).checkpoints.ios['ios-attach'], undefined);
+            assert.ok(f.requests.length > 0 && f.requests.every(request => request.method === 'GET'));
+          } finally {
+            if (variant === 'marker-changed') await writeFile(marker, markerBytes);
+          }
+        } });
       } finally {
         await lease.release();
       }

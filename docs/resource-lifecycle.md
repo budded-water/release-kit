@@ -41,8 +41,9 @@ reconciliation, not directory replacement.
 A managed iOS build attachment borrows an existing activity lease. The
 activated policy and settled resource journal must match the installed state
 root. The admission is scoped to the saved release, attachment command, and
-one continuous activity lease. The runner rechecks ownership and the active
-policy before recording attachment checkpoints. It preserves the lease and resource journal
+one continuous activity lease from the attach-aware coordinator. The runner
+rechecks the captured lease record and the active policy before recording
+attachment checkpoints, including within an already admitted heavy task. It preserves the lease and resource journal
 without opening a heavy lifecycle task. See [bounded attachment](ios-upload.md#attach-the-confirmed-build-to-a-manual-draft).
 
 ## Trusted adapter and resource boundaries

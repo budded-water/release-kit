@@ -101,7 +101,7 @@ schedule work, run Fastlane, upload, change release settings or submit for revie
 The runner method is `runner.attachBuild(plan, { versionId })`. It uses the same
 release and target locks and existing state admission. It does not initiate
 resource lifecycle execution or reclamation. For an activated state root, the managed entry provides its scoped resource
-policy and existing activity lease. Attachment verifies live admission for the
+policy and existing activity lease from the reviewed attach-aware coordinator. Attachment verifies live admission for the
 exact saved release. It leaves lifecycle tasks, caches and native sessions
 untouched.
 
