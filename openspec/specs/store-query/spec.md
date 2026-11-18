@@ -3,7 +3,7 @@
 ## Purpose
 Provide independent, bounded store observations: App Store Connect version
 inventory/status, Google Play selected-track releases and exact versionCode status,
-and CN Harmony exact formal/test version status. Preserve provider identity,
+and CN Harmony formal/test version inventory and exact status. Preserve provider identity,
 coverage and lifecycle uncertainty without project execution or a release journal.
 
 ## Requirements
@@ -80,9 +80,9 @@ a project module, build or journal, preserving existing default Apple commands.
 - **THEN** releaseType 1 yields published evidence and releaseType 6 yields testing evidence
 - **AND** available test evidence does not establish publication of a formal version
 
-#### Scenario: Unsupported inventory or selectors
-- **WHEN** Harmony inventory or incompatible provider selectors are requested
-- **THEN** the command refuses before authentication rather than claiming coverage
+#### Scenario: Incompatible provider selectors
+- **WHEN** a caller supplies selectors belonging to another provider or detail selectors to Harmony inventory
+- **THEN** the command refuses before authentication
 
 ### Requirement: Read isolation and truthful lifecycle evidence
 The system SHALL reuse authorized authentication while enforcing bounded reads,
@@ -119,3 +119,32 @@ maintain its own authentication cache outside runner-managed state.
 #### Scenario: Task-resource isolation
 - **WHEN** a caller supplies task-resource lifecycle hooks to a shared CLI store read
 - **THEN** the read does not acquire task/session leases or invoke resource reclamation
+
+### Requirement: Bounded Harmony version discovery
+The system SHALL list CN Harmony formal and test version summaries for an explicitly
+configured app and package through a standalone CLI and API, using the existing
+Service Account and verifying the package-to-app mapping before listing versions.
+
+#### Scenario: Read-only inventory and exact follow-up
+- **WHEN** a caller requests Harmony inventory without version selectors
+- **THEN** the reader performs the bounded package lookup GET and the single documented read-only version-list POST for that app and package
+- **AND** the report includes string versionIds, release types, raw and interpreted lifecycle states and optional package version summaries, so formal/test records can be passed to the existing exact reader
+- **AND** other release types are counted and omitted, provider order is preserved, and coverage applies only to the returned formal/test inventory
+- **AND** an omitted release type uses the documented formal default (1), while an omitted lifecycle state remains unknown
+
+#### Scenario: App identity remains bound throughout a read
+- **WHEN** a caller changes its config object while the read is pending
+- **THEN** lookup, inventory request and report retain the app and package verified at the start
+
+#### Scenario: Empty inventory
+- **WHEN** the provider explicitly returns an empty list or only other release types
+- **THEN** the supported inventory is empty and the observation is complete within scope
+
+#### Scenario: Unavailable inventory
+- **WHEN** the list is unavailable, malformed, exceeds 1,000 entries, exceeds 1,000 package summaries for a supported record, or repeats a supported type/version identity
+- **THEN** observation is incomplete with sanitized diagnostics and no partial inventory is returned
+
+#### Scenario: Read isolation
+- **WHEN** a caller requests inventory or cancels a pending read
+- **THEN** the reader allows only the two fixed reads, bounds request time and body size, refuses redirects and does not retry or return a late successful observation
+- **AND** the report omits non-inventory fields, credentials and raw provider diagnostics

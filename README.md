@@ -152,10 +152,10 @@ not certify full release readiness.
 Existing journal-bound status/observe and publication contracts remain unchanged.
 
 Explicit `--provider google-play` adds bounded release summaries and exact
-track/versionCode queries. `--provider appgallery-connect` adds exact CN Harmony
-formal/test version queries. These require no project module, Expo files, build
-or journal. Harmony inventory is explicitly unsupported; Play summaries are not
-complete history. See [provider selectors and coverage](docs/store-queries.md#google-play-and-harmony-reads)
+track/versionCode queries. `--provider appgallery-connect` lists CN Harmony
+formal/test versions and reads exact versions. Both inventories describe the
+provider records returned for their scope. These commands require no project
+module, Expo files, build or journal. See [provider selectors and coverage](docs/store-queries.md#google-play-and-harmony-reads)
 for commands, auth reuse, lifecycle interpretation and scoped preflight limits.
 This extends read tooling only; no upload/submission or installed-control rollout
 is implied. See the query documentation for scoped real-account acceptance and

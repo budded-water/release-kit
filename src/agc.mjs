@@ -37,7 +37,8 @@ function settings(ctx) {
       'AGC_IDENTITY',
       'Configured Harmony bundle identity differs from the inspection target.',
     );
-  return cfg;
+  // Bind the validated app and selectors across signing and network awaits.
+  return { ...cfg };
 }
 
 async function token(ctx, cfg) {
@@ -81,19 +82,19 @@ async function token(ctx, cfg) {
   }
 }
 
-async function get(ctx, route, query, jwt) {
+async function read(ctx, url, jwt, { method = 'GET', appId, body } = {}) {
   ctx.signal?.throwIfAborted();
-  const url = new URL(route, BASE);
-  url.search = new URLSearchParams(query).toString();
   const timeout = AbortSignal.timeout(60000);
   const requestSignal = ctx.signal ? AbortSignal.any([ctx.signal, timeout]) : timeout;
   let response;
   try {
     response = await (ctx.fetch ?? fetch)(url.href, {
-      method: 'GET',
+      method,
       redirect: 'error',
       signal: requestSignal,
-      headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json',
+        ...(appId ? { appId } : {}) },
+      ...(body ? { body } : {}),
     });
     requestSignal.throwIfAborted();
   } catch {
@@ -138,6 +139,77 @@ async function get(ctx, route, query, jwt) {
   return data;
 }
 
+function get(ctx, route, query, jwt) {
+  const url = new URL(route, BASE);
+  url.search = new URLSearchParams(query).toString();
+  return read(ctx, url, jwt);
+}
+
+async function authenticateApp(ctx, cfg) {
+  const jwt = await token(ctx, cfg);
+  const lookup = await get(ctx, '/api/publish/v2/appid-list',
+    { packageName: cfg.bundleId, packageTypes: '7' }, jwt);
+  if (!Array.isArray(lookup.appids) || !lookup.appids.some(pair => pair?.value === cfg.appId))
+    throw new AgcError('AGC_IDENTITY', 'Provider package lookup does not contain the configured Harmony app ID.');
+  return jwt;
+}
+
+function versionSummaries(data) {
+  const invalid = () => new AgcError('AGC_RESPONSE', 'AGC version inventory is malformed or exceeds its bound.');
+  const rows = data.versionList;
+  if (!Array.isArray(rows) || rows.length > 1000) throw invalid();
+  const versions = [];
+  const identities = new Set();
+  let excludedReleaseCount = 0;
+  for (const row of rows) {
+    if (!object(row)) throw invalid();
+    // AGC documents formal (1) as the default when releaseType is omitted.
+    const { versionId, releaseType = 1, state, packageList } = row;
+    if (!Number.isSafeInteger(releaseType) || releaseType < 1) throw invalid();
+    if (![1, 6].includes(releaseType)) {
+      excludedReleaseCount++;
+      continue;
+    }
+    if (!id(versionId) || (state !== undefined && (!Number.isSafeInteger(state) || state < 0))) throw invalid();
+    const identity = `${releaseType}:${versionId}`;
+    if (identities.has(identity)) throw invalid();
+    identities.add(identity);
+    const version = { versionId, releaseType, releaseState: state };
+    if (packageList !== undefined) {
+      if (!Array.isArray(packageList) || packageList.length > 1000) throw invalid();
+      version.packages = packageList.map(pkg => {
+        if (!object(pkg)) throw invalid();
+        const { versionName, versionCode } = pkg;
+        if (versionName !== undefined && (typeof versionName !== 'string' ||
+            versionName.length > 128 || /[\x00-\x1f]/.test(versionName))) throw invalid();
+        if (versionCode !== undefined && (!Number.isSafeInteger(versionCode) || versionCode < 0)) throw invalid();
+        return { ...(versionName !== undefined ? { version: versionName } : {}),
+          ...(versionCode !== undefined ? { versionCode } : {}) };
+      });
+    }
+    versions.push(version);
+  }
+  return { versions, excludedReleaseCount };
+}
+
+export async function listAgcReleases(ctx) {
+  try {
+    ctx.signal?.throwIfAborted();
+    const cfg = settings(ctx);
+    if (cfg.bundleId.length > 128)
+      throw new AgcError('AGC_CONFIG', 'Harmony inventory requires a package name of at most 128 characters.');
+    const jwt = await authenticateApp(ctx, cfg);
+    // This documented POST lists versions for the verified app. No other POST route is used.
+    const data = await read(ctx, new URL('/api/publish/v3/version/brief-info/list', BASE), jwt, {
+      method: 'POST', appId: cfg.appId, body: JSON.stringify({ packageName: cfg.bundleId }),
+    });
+    return { ok: true, ...versionSummaries(data) };
+  } catch (error) {
+    ctx.signal?.throwIfAborted();
+    return { ok: false, code: error instanceof AgcError ? error.code : 'AGC_INSPECTION' };
+  }
+}
+
 // Read-only visibility. Raw app-info contains review passwords and government IDs;
 // only the explicitly selected public operational fields may leave this module.
 export async function inspectAgc(ctx, selection = {}) {
@@ -159,19 +231,7 @@ export async function inspectAgc(ctx, selection = {}) {
         (releaseType === 6 && !versionId) ||
         (cfg.versionId && selection.versionId && cfg.versionId !== selection.versionId))
       throw new AgcError('AGC_CONFIG', 'Select a supported release type and matching exact version ID.');
-    const jwt = await token(ctx, cfg);
-    ctx.signal?.throwIfAborted();
-    const lookup = await get(
-      ctx,
-      '/api/publish/v2/appid-list',
-      { packageName: cfg.bundleId, packageTypes: '7' },
-      jwt,
-    );
-    if (!Array.isArray(lookup.appids) || !lookup.appids.some((pair) => pair.value === cfg.appId))
-      throw new AgcError(
-        'AGC_IDENTITY',
-        'Provider package lookup does not contain the configured Harmony app ID.',
-      );
+    const jwt = await authenticateApp(ctx, cfg);
     const data = await get(
       ctx,
       '/api/publish/v3/app-info',

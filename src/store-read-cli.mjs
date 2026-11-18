@@ -2,7 +2,7 @@ import { parseArgs } from 'node:util';
 import { loadConfig } from './plan.mjs';
 import { inspectAppStore } from './store-preflight.mjs';
 import { listStoreVersions, getStoreVersion } from './store-query.mjs';
-import { listPlayReleases, getPlayRelease, getHarmonyRelease } from './provider-store-query.mjs';
+import { listPlayReleases, getPlayRelease, listHarmonyReleases, getHarmonyRelease } from './provider-store-query.mjs';
 import { inspectProviderStore } from './provider-store-preflight.mjs';
 
 export async function storeReadMain({ args, environment = process.env, signal,
@@ -20,7 +20,7 @@ export async function storeReadMain({ args, environment = process.env, signal,
   if (!['app-store-connect', 'google-play', 'appgallery-connect'].includes(provider))
     throw new Error('Unsupported query provider');
   if (values.help) {
-    output(`${operation} --config <private.json> [--provider app-store-connect|google-play|appgallery-connect] [--timeout-seconds <1–300>]\nGET-only iOS App Store reads by default: --version <candidate> [--build-id <expected-apple-build>] (neither for store-versions).\nPlay: --track <track> and --version-code <code> for status/preflight.\nHarmony status/preflight: --release-type 1|6 --version-id <id>; inventory unsupported.\nNo project, journal, edit creation or publication approval; Google authentication may POST to exact OAuth/IAM endpoints.`);
+    output(`${operation} --config <private.json> [--provider app-store-connect|google-play|appgallery-connect] [--timeout-seconds <1–300>]\nGET-only iOS App Store reads by default: --version <candidate> [--build-id <expected-apple-build>] (neither for store-versions).\nPlay: --track <track> and --version-code <code> for status/preflight.\nHarmony: store-versions lists formal/test versions; use --release-type 1|6 and --version-id <id> for status/preflight.\nNo project, journal, edit creation or publication approval; Google authentication and the Harmony list endpoint use bounded POSTs.`);
     return 0;
   }
   if (positionals.length !== 1 || !['store-versions', 'store-status', 'store-preflight'].includes(operation) || !values.config)
@@ -36,10 +36,10 @@ export async function storeReadMain({ args, environment = process.env, signal,
         (inventory ? values['version-code'] !== undefined : !values['version-code']))
       throw new Error('Play requires an explicit track and status/preflight version-code, without other provider selectors');
   } else {
-    if (inventory) throw new Error('Harmony version inventory is unsupported; query an exact version ID');
-    if (has(['version', 'build-id', 'track', 'version-code']) ||
-        !['1', '6'].includes(values['release-type']) || !values['version-id'])
-      throw new Error('Harmony requires release-type 1/6 and version-id without other provider selectors');
+    if (has(['version', 'build-id', 'track', 'version-code'])) throw new Error('Incompatible Harmony query selectors');
+    if (inventory ? has(['release-type', 'version-id'])
+      : !['1', '6'].includes(values['release-type']) || !values['version-id'])
+      throw new Error('Harmony status/preflight require release-type 1/6 and version-id; inventory accepts neither');
   }
   if (!/^[1-9]\d*$/.test(values['timeout-seconds']) || Number(values['timeout-seconds']) > 300)
     throw new Error('Observation timeout must be an integer from 1 to 300 seconds');
@@ -47,7 +47,8 @@ export async function storeReadMain({ args, environment = process.env, signal,
   const { config } = await loadConfig(values.config);
   if (provider !== 'app-store-connect') {
     const inspect = inspector ?? (operation === 'store-preflight' ? inspectProviderStore
-      : provider === 'google-play' ? inventory ? listPlayReleases : getPlayRelease : getHarmonyRelease);
+      : provider === 'google-play' ? (inventory ? listPlayReleases : getPlayRelease)
+        : (inventory ? listHarmonyReleases : getHarmonyRelease));
     const report = await inspect({ provider, store: config.stores?.[provider === 'google-play' ? 'android' : 'harmony'],
       track: values.track, versionCode: values['version-code'], releaseType: values['release-type'] === undefined ? undefined : Number(values['release-type']),
       versionId: values['version-id'], environment, command, signal, timeoutMs: Number(values['timeout-seconds']) * 1000 });
