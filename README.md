@@ -127,7 +127,7 @@ results and unknown adapter states return nonzero.
 Adapters must use these explicit outcomes. Polling uses the same classification
 but succeeds only when all selected platforms have verified availability.
 
-## Standalone iOS store reads and preflight
+## Standalone store reads and preflight
 
 ```sh
 pnpm exec release-kit store-versions --config /absolute/private/store.json
@@ -150,6 +150,16 @@ Authorized read-only reuse was verified in two real projects with private eviden
 Installed managed-controller adoption remains separate and deferred; these reads do
 not certify full release readiness.
 Existing journal-bound status/observe and publication contracts remain unchanged.
+
+Explicit `--provider google-play` adds bounded release summaries and exact
+track/versionCode queries. `--provider appgallery-connect` adds exact CN Harmony
+formal/test version queries. These require no project module, Expo files, build
+or journal. Harmony inventory is explicitly unsupported; Play summaries are not
+complete history. See [provider selectors and coverage](docs/store-queries.md#google-play-and-harmony-reads)
+for commands, auth reuse, lifecycle interpretation and scoped preflight limits.
+This extends read tooling only; no upload/submission or installed-control rollout
+is implied. See the query documentation for scoped real-account acceptance and
+remaining adoption boundaries.
 
 ## Read-only release storage
 

@@ -1706,3 +1706,15 @@ export async function contentSession(ctx) {
       }),
   };
 }
+
+// Standalone Play queries reuse authentication without exposing a write session.
+// The caller supplies the constrained transport and operation-wide signal.
+export async function playReadSession(ctx) {
+  const cfg = identitySettings(ctx);
+  if (ctx.platform !== 'android') throw new StoreError('Play reads require Android identity.');
+  await credentialReference(ctx, cfg, true);
+  const token = await googleToken(ctx, cfg);
+  return {
+    releases: (track) => request(ctx, `${playBase(cfg)}/tracks/${segment(track)}/releases`, token),
+  };
+}

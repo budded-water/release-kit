@@ -37,6 +37,9 @@ doctor --config <private.json> [--platforms ios,android,harmony] [--publish]
 store-versions --config <private.json>
 store-status --config <private.json> --version <candidate> [--build-id <expected-apple-build>]
 store-preflight --config <private.json> --version <candidate> [--build-id <expected-apple-build>]
+  Store reads default to Apple; explicit --provider google-play uses --track and
+  --version-code (status/preflight), appgallery-connect uses --release-type and
+  --version-id (status/preflight only). See each command's --help.
 provider-inspect --config <private.json> [--platforms ios,android,harmony]
 store-plan --config <private.json> --ref <commit> --platforms ios|android
 store-apply <release-id> --config <private.json> --approve <content-plan-digest>
@@ -105,7 +108,7 @@ export async function main({
   if (args[0] === 'storage-reclaim') return resourceReclaimMain({ args, repo, project,
     command: executeCommand, signal, resourceLease, environment, output });
   if (['storage-inspect', 'storage-plan'].includes(args[0])) return storageMain({ args, signal, output });
-  if (['store-versions', 'store-status', 'store-preflight'].includes(args[0])) return storeReadMain({ args, environment, signal, output });
+  if (['store-versions', 'store-status', 'store-preflight'].includes(args[0])) return storeReadMain({ args, environment, signal, output, command: executeCommand });
   if (args[0] === 'wechat') return wechatMain({ args: args.slice(1), repo, project: wechatProject, command: executeCommand, signal, output });
   const { values, positionals } = parseArgs({
     args,

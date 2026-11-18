@@ -58,6 +58,16 @@ try {
     import { listStoreVersions, getStoreVersion } from '@budded-water/release-kit/store-query';
     assert.equal(typeof listStoreVersions, 'function');
     assert.equal(typeof getStoreVersion, 'function');
+    const providers = await import('@budded-water/release-kit/provider-store-query');
+    const providerPreflight = await import('@budded-water/release-kit/provider-store-preflight');
+    assert.equal(typeof providers.listPlayReleases, 'function');
+    assert.equal(typeof providers.getHarmonyRelease, 'function');
+    assert.equal(typeof providerPreflight.inspectProviderStore, 'function');
+    assert.equal(typeof providerPreflight.assessProviderPreflight, 'function');
+    const play = await providers.getPlayRelease({store:{packageName:'test.example'},track:'production',versionCode:'42',
+      session:async()=>({releases:async()=>({releases:[{track:'production',releaseLifecycleState:'RELEASE_LIFECYCLE_STATE_IN_REVIEW',activeArtifacts:[{versionCode:42}]}]})})});
+    assert.equal(play.resolution,'found'); assert.equal(play.release.reviewState,'in-review');
+    assert.equal(play.target.provider,'google-play');
     assert.equal(typeof assessStorePreflight, 'function');
     const query = await getStoreVersion({appId:'123',bundleId:'test.example',apiKeyPathEnv:'EXAMPLE_KEY',candidateVersion:'1.0.0',
       session:async()=>({read:async path=>path.startsWith('/v1/apps/')?{data:{id:'123',type:'apps',attributes:{bundleId:'test.example'}}}:{data:null},
