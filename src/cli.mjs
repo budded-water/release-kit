@@ -39,7 +39,9 @@ store-status --config <private.json> --version <candidate> [--build-id <expected
 store-preflight --config <private.json> --version <candidate> [--build-id <expected-apple-build>]
   Store reads default to Apple; explicit --provider google-play uses --track and
   --version-code (status/preflight). Harmony lists formal/test versions and uses
-  --release-type and --version-id for status/preflight. See each command's --help.
+  --release-type and --version-id for status/preflight. WeChat lists current
+  experience/production versions and queries review with --latest or --audit-id.
+  See each command's --help.
 provider-inspect --config <private.json> [--platforms ios,android,harmony]
 store-plan --config <private.json> --ref <commit> --platforms ios|android
 store-apply <release-id> --config <private.json> --approve <content-plan-digest>

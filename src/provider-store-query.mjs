@@ -1,6 +1,7 @@
 import { playReadSession } from './stores.mjs';
 import { inspectAgc, listAgcReleases } from './agc.mjs';
 import { runCommand } from './command.mjs';
+import { observeStoreRead } from './store-read-observation.mjs';
 
 const need = (condition, message) => { if (!condition) throw new Error(message); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -8,25 +9,6 @@ const packageName = value => typeof value === 'string' && value.length <= 255 &&
 const versionCode = value => typeof value === 'string' && /^[1-9]\d{0,9}$/.test(value) && BigInt(value) <= 2100000000n;
 const versionId = value => typeof value === 'string' && /^\d{1,32}$/.test(value);
 const trackName = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(value);
-
-// One operation, one deadline; neither a late transport nor a caught abort can
-// turn a cancelled observation into a successful report.
-async function observe(options, target, action) {
-  const { timeoutMs = 120000, signal: parent } = options;
-  need(Number.isInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 3600000, 'Read timeout must be 1–3600000 milliseconds');
-  parent?.throwIfAborted();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new DOMException('Store read timed out', 'TimeoutError')), timeoutMs);
-  const signal = parent ? AbortSignal.any([parent, controller.signal]) : controller.signal;
-  const startedAt = new Date().toISOString();
-  try {
-    const result = await action(signal);
-    signal.throwIfAborted();
-    return { schemaVersion: 1, ...result, target, source: 'official-api', readOnly: true,
-      startedAt, observedAt: startedAt, completedAt: new Date().toISOString(),
-      observationComplete: result.errors.length === 0 };
-  } finally { clearTimeout(timer); }
-}
 
 function playTransport(options, target, signal) {
   const resource = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(target.packageName)}/tracks/${encodeURIComponent(target.track)}/releases`;
@@ -91,7 +73,7 @@ async function readPlay(options, exact) {
   need(trackName(options.track), 'Expected explicit Play track');
   need(!exact || versionCode(options.versionCode), 'Expected decimal Play versionCode');
   const target = { provider: 'google-play', platform: 'ANDROID', packageName: options.store.packageName, track: options.track };
-  return observe(options, target, async signal => {
+  return observeStoreRead(options, target, async signal => {
     let releases = [], errors = [];
     try {
       const api = await (options.session ?? playReadSession)({ platform: 'android',
@@ -146,7 +128,7 @@ function harmonyContext(options, signal) {
 
 export async function listHarmonyReleases(options) {
   const target = harmonyTarget(options.store);
-  return observe(options, target, async signal => {
+  return observeStoreRead(options, target, async signal => {
     const result = await listAgcReleases(harmonyContext(options, signal));
     const versions = result.ok ? result.versions.map(({ releaseState, ...version }) => ({
       ...version, ...harmonyState({ releaseType: version.releaseType, releaseState }),
@@ -162,7 +144,7 @@ export async function getHarmonyRelease(options) {
   const target = { ...harmonyTarget(store), releaseType, versionId: candidate };
   need([1, 6].includes(releaseType) && versionId(candidate), 'Expected Harmony releaseType 1/6 and exact versionId');
   need(!store.versionId || store.versionId === candidate, 'Configured Harmony version differs from the requested version');
-  return observe(options, target, async signal => {
+  return observeStoreRead(options, target, async signal => {
     const result = await inspectAgc(harmonyContext(options, signal),
       { releaseType, versionId: candidate, preflight: options.preflight === true });
     signal.throwIfAborted();

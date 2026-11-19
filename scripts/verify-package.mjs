@@ -65,6 +65,12 @@ try {
     assert.equal(typeof providers.listPlayReleases, 'function');
     assert.equal(typeof providers.listHarmonyReleases, 'function');
     assert.equal(typeof providers.getHarmonyRelease, 'function');
+    import { listWechatVersions, getWechatAudit } from '@budded-water/release-kit/wechat-store-query';
+    assert.equal(typeof listWechatVersions, 'function');
+    assert.equal(typeof getWechatAudit, 'function');
+    let wechatHelp;
+    assert.equal(await main({args:['store-status','--provider','wechat-mini-program','--help'],output:s=>wechatHelp=s}),0);
+    assert.ok(wechatHelp.includes('--latest or --audit-id'));
     let inventoryHelp;
     assert.equal(await main({args:['store-versions','--provider','appgallery-connect','--help'],output:s=>inventoryHelp=s}),0);
     assert.ok(inventoryHelp.includes('lists formal/test versions'));

@@ -273,3 +273,70 @@ missing listing data. Status-only queries do not require listing metadata.
 
 Store-read dispatch remains independent of task-resource lifecycle admission,
 leases and reclamation; the shared CLI does not activate those hooks for reads.
+
+## WeChat Mini Program reads
+
+Use the standalone client with a private configuration. Supply a current
+third-party `authorizer_access_token` through the named environment variable.
+Set the token using an existing authorized credential source. The configuration
+stores the environment variable name and AppID. The reader checks the AppID and
+mini program account type with the same token before reading version or audit data.
+Confirm permission set 18 for [code queries](https://developers.weixin.qq.com/doc/oplatform/openApi/miniprogram-management/code-management/api_getversioninfo.html)
+and the applicable permission for [account identity](https://developers.weixin.qq.com/doc/oplatform/openApi/miniprogram-management/basic-info-management/api_getaccountbasicinfo.html)
+(30 for mini program account management). Token issuance and refresh belong to
+the consumer's authorized third-party platform.
+
+```json
+{
+  "schemaVersion": 1,
+  "stores": {
+    "wechat": {
+      "appId": "wx1111111111111111",
+      "authorizerAccessTokenEnv": "EXAMPLE_WECHAT_AUTHORIZER_TOKEN"
+    }
+  }
+}
+```
+
+```sh
+release-kit store-versions --provider wechat-mini-program --config /private/wechat-query.json
+release-kit store-status --provider wechat-mini-program --config /private/wechat-query.json --latest
+release-kit store-status --provider wechat-mini-program --config /private/wechat-query.json --audit-id 1234567
+```
+
+```js
+import { listWechatVersions, getWechatAudit } from '@budded-water/release-kit/wechat-store-query';
+
+const options = { store: { appId: 'wx1111111111111111', authorizerAccessTokenEnv: 'EXAMPLE_WECHAT_AUTHORIZER_TOKEN' } };
+const versions = await listWechatVersions(options);
+const latest = await getWechatAudit({ ...options, latest: true });
+const exact = await getWechatAudit({ ...options, auditId: '1234567' });
+```
+
+`store-versions` reports `current-experience-production` coverage and at most
+two `versions` rows. Each row identifies the channel, version label, provider
+timestamp in epoch seconds and observed channel state. Missing or malformed
+slots yield incomplete coverage with errors and any verified rows still present.
+The coverage describes only the current experience and production slots.
+
+Status reads return `audit` for one explicit selector. Latest may include the
+reported version and submission time. Exact status binds to the requested
+decimal audit ID and reports fields supported by that endpoint. Interpret
+`rawState` and `reviewState` separately from `publicationState`, which stays
+unknown in audit reads. Future status values retain the raw number. Invalid
+IDs, permission failures and malformed responses produce an unavailable
+observation. A completed observation can report a rejected audit with exit 0.
+CLI exit 2 denotes incomplete evidence. Reports with descriptions or reasons
+may contain private review information. Share them within the release team.
+
+The allowlist uses bounded HTTPS requests and disables redirects. Identity,
+version and exact-audit reads use POST as specified by WeChat. Latest audit uses
+GET. The only WeChat endpoints are `getaccountbasicinfo`, `getversioninfo`,
+[`get_latest_auditstatus`](https://developers.weixin.qq.com/doc/oplatform/openApi/miniprogram-management/code-management/api_getlatestauditstatus.html)
+and [`get_auditstatus`](https://developers.weixin.qq.com/doc/oplatform/openApi/miniprogram-management/code-management/api_getauditstatus.html).
+The separate [developer-upload journal](wechat-uploads.md) owns upload state and
+its current developer-version observation. This scoped query has no complete
+upload history, and the current experience/production slots cannot establish the
+most recent developer upload. Preflight and release actions have separate contracts.
+Synthetic contract verification covers the adapter. Authorized live acceptance
+and installed-client adoption remain pending.
