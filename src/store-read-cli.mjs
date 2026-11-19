@@ -6,11 +6,18 @@ import { listPlayReleases, getPlayRelease, listHarmonyReleases, getHarmonyReleas
 import { inspectProviderStore } from './provider-store-preflight.mjs';
 import { getWechatAudit, listWechatVersions, validWechatAuditId } from './wechat-store-query.mjs';
 
+const wechatProvider = 'wechat-mini-program';
+const operations = ['store-versions', 'store-status', 'store-preflight'];
+export function isWechatStoreRead(args) {
+  return operations.includes(args[0]) && args.some((arg, index) => arg === `--provider=${wechatProvider}` ||
+    (arg === '--provider' && args[index + 1] === wechatProvider));
+}
+
 export async function storeReadMain({ args, environment = process.env, signal,
   output = console.log, inspector, command }) {
   signal?.throwIfAborted();
   const operation = args[0];
-  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true,
+  const { values, positionals, tokens } = parseArgs({ args, allowPositionals: true, strict: true, tokens: true,
     options: { config: { type: 'string' }, version: { type: 'string' },
       'build-id': { type: 'string' }, 'timeout-seconds': { type: 'string', default: '120' },
       provider: { type: 'string', default: 'app-store-connect' },
@@ -19,17 +26,21 @@ export async function storeReadMain({ args, environment = process.env, signal,
       latest: { type: 'boolean' }, 'audit-id': { type: 'string' },
       help: { type: 'boolean' } } });
   const provider = values.provider;
-  if (!['app-store-connect', 'google-play', 'appgallery-connect', 'wechat-mini-program'].includes(provider))
+  const requestedWechat = tokens.some(arg => arg.kind === 'option' && arg.name === 'provider' && arg.value === wechatProvider);
+  if (requestedWechat && ['provider', 'config', 'timeout-seconds'].some(name =>
+    tokens.filter(arg => arg.kind === 'option' && arg.name === name).length > 1))
+    throw new Error('WeChat store reads require one provider, config and optional timeout');
+  if (!['app-store-connect', 'google-play', 'appgallery-connect', wechatProvider].includes(provider))
     throw new Error('Unsupported query provider');
   if (values.help) {
     output(`${operation} --config <private.json> [--provider app-store-connect|google-play|appgallery-connect|wechat-mini-program] [--timeout-seconds <1–300>]\nGET-only iOS App Store reads by default: --version <candidate> [--build-id <expected-apple-build>] (neither for store-versions).\nPlay: --track <track> and --version-code <code> for status/preflight.\nHarmony: store-versions lists formal/test versions; use --release-type 1|6 and --version-id <id> for status/preflight.\nWeChat: store-versions reads current experience/production; store-status takes --latest or --audit-id <id>.\nNo project, journal, edit creation or publication approval. Provider authentication and some read endpoints use bounded POSTs.`);
     return 0;
   }
-  if (positionals.length !== 1 || !['store-versions', 'store-status', 'store-preflight'].includes(operation) || !values.config)
+  if (positionals.length !== 1 || !operations.includes(operation) || !values.config)
     throw new Error('Store reads require --config and accept no release ID');
   const inventory = operation === 'store-versions';
   const has = keys => keys.some(key => values[key] !== undefined);
-  if (provider !== 'wechat-mini-program' && has(['latest', 'audit-id']))
+  if (provider !== wechatProvider && has(['latest', 'audit-id']))
     throw new Error('WeChat selectors require the wechat-mini-program provider');
   if (provider === 'app-store-connect') {
     if (has(['track', 'version-code', 'release-type', 'version-id'])) throw new Error('Incompatible Apple query selectors');
@@ -50,14 +61,15 @@ export async function storeReadMain({ args, environment = process.env, signal,
       throw new Error('Incompatible WeChat query selectors');
     const auditId = values['audit-id'];
     if (inventory && has(['latest', 'audit-id'])) throw new Error('WeChat store-versions accepts no audit selector');
-    if (!inventory && (values.latest === true ? auditId !== undefined : !validWechatAuditId(auditId)))
+    const selectors = tokens.filter(arg => arg.kind === 'option' && ['latest', 'audit-id'].includes(arg.name));
+    if (!inventory && (selectors.length !== 1 || (values.latest !== true && !validWechatAuditId(auditId))))
       throw new Error('WeChat store-status requires --latest or --audit-id');
   }
   if (!/^[1-9]\d*$/.test(values['timeout-seconds']) || Number(values['timeout-seconds']) > 300)
     throw new Error('Observation timeout must be an integer from 1 to 300 seconds');
   signal?.throwIfAborted();
   const { config } = await loadConfig(values.config);
-  if (provider === 'wechat-mini-program') {
+  if (provider === wechatProvider) {
     const inspect = inspector ?? (inventory ? listWechatVersions : getWechatAudit);
     const report = await inspect({ store: config.stores?.wechat, latest: values.latest, auditId: values['audit-id'],
       environment, signal, timeoutMs: Number(values['timeout-seconds']) * 1000 });

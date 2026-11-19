@@ -329,6 +329,11 @@ observation. A completed observation can report a rejected audit with exit 0.
 CLI exit 2 denotes incomplete evidence. Reports with descriptions or reasons
 may contain private review information. Share them within the release team.
 
+Use a single config and a single audit selector. The executable checks the
+standalone invocation before importing a project module. Duplicate JSON members
+and noncanonical integer evidence yield incomplete results. Cancellation and the
+observation deadline cover both response headers and body reads.
+
 The allowlist uses bounded HTTPS requests and disables redirects. Identity,
 version and exact-audit reads use POST as specified by WeChat. Latest audit uses
 GET. The only WeChat endpoints are `getaccountbasicinfo`, `getversioninfo`,

@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { main } from './cli.mjs';
 import { getWechatAudit, listWechatVersions } from './wechat-store-query.mjs';
 
 const appId = 'wx1111111111111111';
-const token = 'test-authorizer-token+/=';
+const token = 'test-authorizer~token+/=';
 const tokenName = 'EXAMPLE_WECHAT_TOKEN';
 const identityPath = '/cgi-bin/account/getaccountbasicinfo';
 const versionsPath = '/wxa/getversioninfo';
@@ -37,7 +39,7 @@ function fixture() {
     assert.ok(Object.hasOwn(responses, pathname));
     calls.push({ path: pathname, method: init.method, body: init.body && JSON.parse(init.body) });
     const data = responses[pathname];
-    return typeof data === 'function' ? data(init) : Response.json(data);
+    return typeof data === 'function' ? data(init, target) : Response.json(data);
   };
   return { options: { store, environment: { [tokenName]: token }, fetch }, calls, responses };
 }
@@ -122,6 +124,10 @@ test('WeChat slots can be partial and malformed or unsuccessful audits never bec
     [{ errcode: 40014 }, 'authentication'],
     [() => new Response('{}', { status: 403 }), 'forbidden'],
     [() => new Response('malformed JSON'), 'malformed-response'],
+    [() => new Response('{"errcode":0,"auditid":41,"\\u0061uditid":42,"status":0}'), 'malformed-response'],
+    [() => new Response('{"errcode":0,"status":1,"status":0}'), 'malformed-response'],
+    [() => new Response('{"errcode":0,"status":1e-324}'), 'malformed-response'],
+    [() => new Response('{"errcode":0,"auditid":42.000000000000001,"status":0}'), 'malformed-response'],
     [() => new Response('x'.repeat(256 * 1024 + 1)), 'response-too-large'],
   ]) {
     f.responses[exactPath] = response;
@@ -135,13 +141,33 @@ test('WeChat slots can be partial and malformed or unsuccessful audits never bec
 
 test('WeChat only emits bounded, sanitized free text and never copies transport errors', async () => {
   const f = fixture();
-  f.responses[latestPath].reason = `before\u0000${token}\n${encodeURIComponent(token)} ${'中'.repeat(1100)}`;
+  const latest = f.responses[latestPath];
+  f.responses[latestPath] = (_, url) => Response.json({ ...latest,
+    reason: `before\u0000${token}\n${encodeURIComponent(token)} ${url.search.split('=')[1]} ${'中'.repeat(1100)}` });
   const report = await getWechatAudit({ ...f.options, latest: true });
   assert.equal(report.audit.reason.length, 1024);
-  assert.match(report.audit.reason, /^before \[redacted\] \[redacted\]/);
+  assert.match(report.audit.reason, /^before \[redacted\] \[redacted\] \[redacted\]/);
   f.responses[latestPath] = () => { throw new Error(`private request failure ${token}`); };
   const failure = await getWechatAudit({ ...f.options, latest: true });
   assert.deepEqual(failure.errors, [{ code: 'audit-status', reason: 'read-unavailable' }]);
+});
+
+test('WeChat omits provider text that exposes the token as sent in the query string', async () => {
+  const f = fixture();
+  const versions = f.responses[versionsPath];
+  f.responses[versionsPath] = (_, url) => {
+    const encoded = url.search.split('=')[1];
+    assert.match(encoded, /%7E/);
+    return Response.json({ ...versions,
+      exp_info: { ...versions.exp_info, exp_version: encoded },
+      release_info: { ...versions.release_info, release_desc: encoded },
+    });
+  };
+  const report = await listWechatVersions(f.options);
+  assert.equal(report.observationComplete, false);
+  assert.equal(report.versions.length, 1);
+  assert.equal(report.versions[0].description, '[redacted]');
+  assert.doesNotMatch(JSON.stringify(report), /test-authorizer/);
 });
 
 test('WeChat cancellable queries cannot report a late response as evidence', async () => {
@@ -160,6 +186,34 @@ test('WeChat cancellable queries cannot report a late response as evidence', asy
   assert.deepEqual(f.calls.map(call => call.path), [identityPath, versionsPath, identityPath]);
 });
 
+test('WeChat deadlines stop stalled headers, stalled bodies and over-budget approvals', { timeout: 3000 }, async () => {
+  const f = fixture();
+  let releaseHeaders;
+  const headers = new Promise(resolve => { releaseHeaders = resolve; });
+  const cancelledLate = Promise.withResolvers();
+  f.responses[exactPath] = () => headers;
+  await assert.rejects(getWechatAudit({ ...f.options, auditId: '42', timeoutMs: 100 }), { name: 'TimeoutError' });
+  assert.equal(f.calls.at(-1).path, exactPath);
+  releaseHeaders(new Response(new ReadableStream({ cancel() { cancelledLate.resolve(); } })));
+  await cancelledLate.promise;
+
+  let cancelledBody = false;
+  const stalled = new Response(new ReadableStream({
+    start(stream) { stream.enqueue(Buffer.from('{"errcode":0,"status":0}')); },
+    cancel() { cancelledBody = true; return new Promise(() => {}); },
+  }));
+  f.responses[exactPath] = () => stalled;
+  await assert.rejects(getWechatAudit({ ...f.options, auditId: '42', timeoutMs: 100 }), { name: 'TimeoutError' });
+  assert.equal(cancelledBody, true);
+  assert.equal(stalled.body.locked, false);
+
+  f.responses[exactPath] = () => {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 160);
+    return Response.json({ errcode: 0, status: 0 });
+  };
+  await assert.rejects(getWechatAudit({ ...f.options, auditId: '42', timeoutMs: 100 }), { name: 'TimeoutError' });
+});
+
 test('WeChat selector and platform validation happens before config, authentication or provider access', async () => {
   const f = fixture();
   for (const selection of [{}, { latest: true, auditId: '4' }, { auditId: '0' }, { auditId: '9007199254740992' },
@@ -170,11 +224,30 @@ test('WeChat selector and platform validation happens before config, authenticat
   for (const [args, reason] of [
     [['store-status', ...wx], /--latest or --audit-id/],
     [['store-status', ...wx, '--latest', '--audit-id', '42'], /--latest or --audit-id/],
+    [['store-status', ...wx, '--audit-id', '41', '--audit-id=42'], /--latest or --audit-id/],
+    [['store-status', ...wx, '--latest', '--latest'], /--latest or --audit-id/],
+    [['store-status', ...wx, '--latest', '--config', '/absent/other.json'], /require one provider/],
     [['store-status', ...wx, '--latest', '--version', '1.2.3'], /Incompatible WeChat/],
     [['store-versions', ...wx, '--latest'], /no audit selector/],
     [['store-preflight', ...wx, '--latest'], /supports store-versions and store-status/],
     [['store-status', '--config', '/absent/config.json', '--version', '1.0', '--audit-id', '42'], /WeChat selectors/],
   ]) await assert.rejects(main({ args }), reason);
+});
+
+test('WeChat executable refuses an explicit project without executing its module', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'wechat-standalone-executable-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const project = join(root, 'project.mjs');
+  const executed = join(root, 'executed');
+  await writeFile(project, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(executed)}, 'executed'); export default { repo: '.' };`);
+  const bin = fileURLToPath(new URL('../bin/release-kit.mjs', import.meta.url));
+  for (const provider of [['--provider', 'wechat-mini-program'], ['--provider=wechat-mini-program']]) {
+    const result = spawnSync(process.execPath, [bin, '--project', project, 'store-status',
+      ...provider, '--config', '/absent/config.json', '--audit-id', '0'], { cwd: root, encoding: 'utf8' });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /standalone CLI without --project/);
+    assert.deepEqual(await readdir(root), ['project.mjs']);
+  }
 });
 
 test('standalone WeChat CLI reads from a private config without build or journal setup', async t => {
