@@ -143,6 +143,10 @@ Inventory lists versions; status reads only app/version/selected-build facts;
 preflight adds sanitized listing collection and pure metadata checks. Status and
 preflight require an exact version and never fall back to a different draft.
 
+WeChat Mini Program experience/production and audit reads use the same standalone
+CLI. Choose `--provider wechat-mini-program` and supply an authorized private
+configuration. See the [WeChat query examples](docs/store-queries.md#wechat-mini-program-reads).
+
 See [store reads and consumer integration](docs/store-queries.md) for configuration,
 Node APIs, result/exit semantics, scope, private credential references and limitations.
 The implemented behavior and acceptance scenarios are canonical in

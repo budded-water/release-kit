@@ -2,6 +2,7 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { main } from "../src/cli.mjs";
+import { isWechatStoreRead } from "../src/store-read-cli.mjs";
 
 // Explicit executable configuration: never search candidate sources for plugins.
 const args = process.argv.slice(2);
@@ -10,6 +11,8 @@ try {
   if (args[0] === "--project") {
     if (!args[1])
       throw new Error("--project requires a trusted local module path");
+    if (isWechatStoreRead(args.slice(2)))
+      throw new Error("WeChat store reads use the standalone CLI without --project");
     options = (await import(pathToFileURL(resolve(args[1])).href)).default;
     if (!options || typeof options !== "object" || !options.repo)
       throw new Error(
