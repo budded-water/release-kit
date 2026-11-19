@@ -9,6 +9,10 @@ const methods = Object.freeze({
 });
 const maxResponseBytes = 256 * 1024;
 const integerFields = new Set(['errcode', 'account_type', 'exp_time', 'release_time', 'auditid', 'status', 'submit_audit_time']);
+const versionSlots = [
+  { key: 'exp_info', prefix: 'exp', channel: 'experience', publicationState: 'testing' },
+  { key: 'release_info', prefix: 'release', channel: 'production', publicationState: 'published' },
+];
 const reviewStates = ['approved', 'rejected', 'in-review', 'withdrawn', 'deferred'];
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const positiveInt = value => Number.isSafeInteger(value) && value > 0;
@@ -51,28 +55,37 @@ function createReadGate(signal, check) {
   return { check, run };
 }
 
-function parseFacts(bytes) {
+function parseFacts(bytes, inventory) {
   try {
     const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    const data = JSON.parse(text, (key, value, context) => {
-      if (integerFields.has(key) && typeof value === 'number' &&
-          (!Number.isSafeInteger(value) || String(value) !== context.source)) throw new Error('Invalid integer');
-      return value;
-    });
-    // JSON.parse validates the grammar but collapses repeated members. Walk
-    // strings and object delimiters to detect duplicate decoded keys.
-    const objects = [];
-    for (const [token, delimiter] of text.matchAll(/"(?:[^"\\]|\\[\s\S])*"(\s*:)?|[{}]/g)) {
-      if (token === '{') objects.push(new Set());
-      else if (token === '}') objects.pop();
-      else if (delimiter) {
-        const names = objects.at(-1);
-        const name = JSON.parse(token.slice(0, -delimiter.length));
-        if (names.has(name)) throw new Error('Duplicate field');
-        names.add(name);
+    const data = JSON.parse(text);
+    const invalidSlots = new Set();
+    function invalidate(scope) {
+      if (scope === undefined) throw new Error('Ambiguous response facts');
+      invalidSlots.add(scope);
+    }
+    // The native parser owns JSON syntax. Inspect original member names and
+    // numbers before trusting the values it coalesces or rounds.
+    const containers = [];
+    for (const [token, colon, number] of text.matchAll(/"(?:[^"\\]|\\[\s\S])*"(\s*:)?|[{}\[\],]|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g)) {
+      const current = containers.at(-1);
+      if (token === '{' || token === '[') {
+        const slot = inventory && containers.length === 1 && versionSlots.some(({ key }) => key === current.key)
+          ? current.key : current?.slot;
+        containers.push({ slot, names: token === '{' ? new Set() : undefined });
+      } else if (token === '}' || token === ']') containers.pop();
+      else if (token === ',') current.key = undefined;
+      else if (colon) {
+        const name = JSON.parse(token.slice(0, -colon.length));
+        if (current.names.has(name)) invalidate(current.slot);
+        current.names.add(name);
+        current.key = name;
+      } else if (number !== undefined && integerFields.has(current?.key)) {
+        const value = Number(number);
+        if (!Number.isSafeInteger(value) || String(value) !== number) invalidate(current.slot);
       }
     }
-    return data;
+    return { data, invalidSlots };
   } catch { throw new WechatReadError('malformed-response'); }
 }
 
@@ -114,13 +127,14 @@ function readTransport(fetch, token, signal, gate) {
       throw new WechatReadError(httpStatus === 401 ? 'authentication' : httpStatus === 403 ? 'forbidden' : 'read-unavailable',
         Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599 ? { httpStatus } : {});
     }
-    const data = parseFacts(await readBody(response, gate));
+    const facts = parseFacts(await readBody(response, gate), path === '/wxa/getversioninfo');
+    const { data } = facts;
     gate.check();
     if (!object(data) || !Number.isInteger(data.errcode) || Math.abs(data.errcode) > 2147483647)
       throw new WechatReadError('malformed-response');
     if (data.errcode !== 0)
       throw new WechatReadError(providerReason(data.errcode), { providerCode: data.errcode });
-    return data;
+    return facts;
   };
 }
 
@@ -135,7 +149,7 @@ function withWechatRead(options, target, fallback, code, operation) {
         throw new WechatReadError('missing-or-invalid-token');
       const read = readTransport(options.fetch ?? globalThis.fetch, token, signal, gate);
       stage = 'app-identity';
-      const account = await read('/cgi-bin/account/getaccountbasicinfo');
+      const { data: account } = await read('/cgi-bin/account/getaccountbasicinfo');
       if (account.appid !== target.appId || account.account_type !== 3)
         throw new WechatReadError('app-identity-mismatch');
       stage = code;
@@ -167,14 +181,12 @@ export async function listWechatVersions(options) {
   const target = wechatTarget(options);
   return withWechatRead(options, target, { operation: 'store-versions', coverage: 'current-experience-production',
     versions: [] }, 'versions', async (read, tokenForms) => {
-    const data = await read('/wxa/getversioninfo');
+    const { data, invalidSlots } = await read('/wxa/getversioninfo');
     const versions = [], errors = [];
-    for (const [channel, prefix, publicationState] of [
-      ['experience', 'exp', 'testing'], ['production', 'release', 'published'],
-    ]) {
-      const slot = data[`${prefix}_info`];
+    for (const { key, channel, prefix, publicationState } of versionSlots) {
+      const slot = data[key];
       const version = slot?.[`${prefix}_version`], changedAtEpochSeconds = slot?.[`${prefix}_time`];
-      if (!object(slot) || !versionLabel(version, tokenForms) || !positiveInt(changedAtEpochSeconds)) {
+      if (invalidSlots.has(key) || !object(slot) || !versionLabel(version, tokenForms) || !positiveInt(changedAtEpochSeconds)) {
         errors.push({ code: `${channel}-version`, reason: slot == null ? 'missing-version' : 'malformed-response' });
         continue;
       }
@@ -193,7 +205,7 @@ export async function getWechatAudit(options) {
   const target = { ...wechatTarget(options), ...(latest ? { selector: 'latest-audit' } : { selector: 'audit-id', auditId }) };
   return withWechatRead(options, target, { operation: 'store-status', coverage: target.selector, resolution: 'unavailable' },
     'audit-status', async (read, tokenForms) => {
-      const data = await (latest ? read('/wxa/get_latest_auditstatus') : read('/wxa/get_auditstatus', { auditid: Number(auditId) }));
+      const { data } = await (latest ? read('/wxa/get_latest_auditstatus') : read('/wxa/get_auditstatus', { auditid: Number(auditId) }));
       const observedId = latest ? data.auditid : Number(auditId);
       if (!positiveInt(observedId) || (!latest && data.auditid !== undefined && data.auditid !== observedId) ||
           !Number.isInteger(data.status) || data.status < 0 || data.status > 2147483647 ||

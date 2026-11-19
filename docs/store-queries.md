@@ -331,8 +331,9 @@ may contain private review information. Share them within the release team.
 
 Use a single config and a single audit selector. The executable checks the
 standalone invocation before importing a project module. Duplicate JSON members
-and noncanonical integer evidence yield incomplete results. Cancellation and the
-observation deadline cover both response headers and body reads.
+and noncanonical integer evidence invalidate the affected slot or, for identity,
+audit or top-level data, the whole response. Cancellation and the observation
+deadline cover both response headers and body reads.
 
 The allowlist uses bounded HTTPS requests and disables redirects. Identity,
 version and exact-audit reads use POST as specified by WeChat. Latest audit uses

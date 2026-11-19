@@ -139,6 +139,26 @@ test('WeChat slots can be partial and malformed or unsuccessful audits never bec
   }
 });
 
+test('WeChat inventory retains a verified sibling when raw evidence is ambiguous within one slot', async () => {
+  const f = fixture();
+  const production = JSON.stringify(f.responses[versionsPath].release_info);
+  for (const experience of [
+    '{"exp_version":"V1.5","exp_time":1640762988.00000001}',
+    '{"exp_version":"V1.5","exp_time":0,"\\u0065xp_time":1640762988}',
+    '{"exp_version":"V1.5","exp_time":1640762988,"extra":[{"key":1,"key":2}]}',
+  ]) {
+    f.responses[versionsPath] = () => new Response(`{"errcode":0,"exp_info":${experience},"release_info":${production}}`);
+    const result = await listWechatVersions(f.options);
+    assert.equal(result.observationComplete, false);
+    assert.deepEqual(result.versions.map(version => version.channel), ['production']);
+    assert.deepEqual(result.errors, [{ code: 'experience-version', reason: 'malformed-response' }]);
+  }
+  f.responses[versionsPath] = () => new Response(`{"errcode":0,"release_info":${production},"release_info":${production}}`);
+  const ambiguous = await listWechatVersions(f.options);
+  assert.deepEqual(ambiguous.versions, []);
+  assert.deepEqual(ambiguous.errors, [{ code: 'versions', reason: 'malformed-response' }]);
+});
+
 test('WeChat only emits bounded, sanitized free text and never copies transport errors', async () => {
   const f = fixture();
   const latest = f.responses[latestPath];
